@@ -417,7 +417,47 @@ class CredentialPool:
         )
         self._replace_entry(entry, updated)
         self._persist()
+        try:
+            from agent.credential_telemetry import get_telemetry
+            ttl = _exhausted_ttl(status_code)
+            if status_code == 429:
+                reason = "rate_limit"
+            elif status_code == 402:
+                reason = "billing"
+            elif status_code in (401, 403):
+                reason = "auth"
+            else:
+                reason = "other"
+            get_telemetry().record_cooldown(
+                provider=self.provider,
+                account_id=str(getattr(entry, "id", "") or "unknown"),
+                label=getattr(entry, "label", None) or getattr(entry, "id", None),
+                status_code=status_code,
+                reason=reason,
+                cooldown_until=time.time() + ttl,
+            )
+        except Exception:
+            logger.debug("credential_telemetry.record_cooldown failed", exc_info=True)
         return updated
+
+    def current_entry(self) -> Optional[PooledCredential]:
+        """Alias for :meth:`current` — returns the most recently selected entry."""
+        return self.current()
+
+    def account_descriptors(self) -> List[Dict[str, Any]]:
+        """Lightweight per-entry summary for display surfaces (dashboard, chat)."""
+        now = time.time()
+        out: List[Dict[str, Any]] = []
+        for entry in self._entries:
+            exhausted_until = _exhausted_until(entry)
+            is_active = (entry.id == self._current_id)
+            out.append({
+                "id": entry.id,
+                "label": entry.label,
+                "exhausted_until": exhausted_until if exhausted_until and exhausted_until > now else None,
+                "is_active": is_active,
+            })
+        return out
 
     def _sync_anthropic_entry_from_credentials_file(self, entry: PooledCredential) -> PooledCredential:
         """Sync a claude_code pool entry from ~/.claude/.credentials.json if tokens differ.
