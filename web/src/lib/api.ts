@@ -434,6 +434,9 @@ export interface AnalyticsSourceBreakdownEntry {
   billing_provider: string;
   billing_base_url: string;
   billing_mode: string;
+  billing_credential_id: string;
+  billing_credential_label: string;
+  billing_account_label: string;
   serving_provider: string;
   serving_label: string;
   serving_detail: string;
@@ -467,6 +470,7 @@ export interface AnalyticsCredentialPoolEntry {
   source: string;
   auth_type: string;
   status: string;
+  request_count: number;
   last_error_code: number | null;
   last_error_message: string | null;
   last_error_reset_at: number | null;

@@ -2691,14 +2691,41 @@ async def update_config_raw(body: RawConfigUpdate):
 
 
 
+def _dashboard_safe_url_detail(url: str | None) -> str:
+    """Return a dashboard-safe URL detail string with credentials stripped."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parsed = urlsplit(raw)
+        if not parsed.scheme or not parsed.netloc:
+            return raw
+        hostname = parsed.hostname or ""
+        netloc = hostname
+        if ":" in hostname and not hostname.startswith("["):
+            netloc = f"[{hostname}]"
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
+        return raw.split("@", 1)[-1] if "@" in raw else raw
+
+
 def _dashboard_display_billing_source(provider: str | None, base_url: str | None, billing_mode: str | None) -> Dict[str, str]:
     """Human-readable serving/billing labels for dashboard analytics."""
     provider_lc = (provider or "").strip().lower()
-    base = (base_url or "").strip()
+    base = _dashboard_safe_url_detail(base_url)
     base_lc = base.lower()
     mode = (billing_mode or "").strip()
+    lm_studio_endpoint = (
+        "lmstudio" in provider_lc
+        or "lmstudio" in base_lc
+        or ":1234" in base_lc
+    )
 
-    if "lmstudio" in provider_lc or "lmstudio" in base_lc or "localhost:1234" in base_lc or "127.0.0.1:1234" in base_lc:
+    if lm_studio_endpoint:
         return {"provider": provider_lc or "local", "label": "LM Studio (local)", "detail": base, "billing_mode": mode or "local"}
     if provider_lc == "openai-codex":
         return {"provider": "openai-codex", "label": "OpenAI Codex / ChatGPT subscription", "detail": base, "billing_mode": mode or "subscription_included"}
@@ -2737,7 +2764,7 @@ def _dashboard_credential_pool_summary() -> List[Dict[str, Any]]:
         for idx, entry in enumerate(sorted(entries, key=lambda e: e.get("priority", 9999) if isinstance(e, dict) else 9999), start=1):
             if not isinstance(entry, dict):
                 continue
-            base_url = entry.get("base_url") or ""
+            base_url = _dashboard_safe_url_detail(entry.get("base_url") or "")
             source_info = _dashboard_display_billing_source(provider, base_url, None)
             summaries.append({
                 "provider": provider,
@@ -2748,6 +2775,7 @@ def _dashboard_credential_pool_summary() -> List[Dict[str, Any]]:
                 "source": str(entry.get("source") or ""),
                 "auth_type": str(entry.get("auth_type") or ""),
                 "status": str(entry.get("last_status") or "ok"),
+                "request_count": int(entry.get("request_count") or 0),
                 "last_error_code": entry.get("last_error_code"),
                 "last_error_message": entry.get("last_error_message"),
                 "last_error_reset_at": entry.get("last_error_reset_at"),
@@ -2755,6 +2783,17 @@ def _dashboard_credential_pool_summary() -> List[Dict[str, Any]]:
                 "serving_label": source_info["label"],
             })
     return summaries
+
+
+def _dashboard_account_label(credential_id: str | None, credential_label: str | None) -> str:
+    """Human-readable non-secret account label for analytics rows."""
+    label = (credential_label or "").strip()
+    if label:
+        return label
+    cid = (credential_id or "").strip()
+    if cid:
+        return f"account {cid}"
+    return "Unattributed account"
 
 # ---------------------------------------------------------------------------
 # Token / cost analytics endpoint
@@ -2803,6 +2842,8 @@ async def get_usage_analytics(days: int = 30):
                    COALESCE(billing_provider, '') as billing_provider,
                    COALESCE(billing_base_url, '') as billing_base_url,
                    COALESCE(billing_mode, '') as billing_mode,
+                   COALESCE(billing_credential_id, '') as billing_credential_id,
+                   COALESCE(billing_credential_label, '') as billing_credential_label,
                    SUM(input_tokens) as input_tokens,
                    SUM(output_tokens) as output_tokens,
                    SUM(cache_read_tokens) as cache_read_tokens,
@@ -2812,7 +2853,7 @@ async def get_usage_analytics(days: int = 30):
                    COUNT(*) as sessions,
                    SUM(COALESCE(api_call_count, 0)) as api_calls
             FROM sessions WHERE started_at > ?
-            GROUP BY day, model, source, billing_provider, billing_base_url, billing_mode
+            GROUP BY day, model, source, billing_provider, billing_base_url, billing_mode, billing_credential_id, billing_credential_label
             ORDER BY day DESC, SUM(input_tokens) + SUM(output_tokens) DESC
         """, (cutoff,))
         daily_breakdown = []
@@ -2823,6 +2864,11 @@ async def get_usage_analytics(days: int = 30):
                 row.get("billing_provider"),
                 row.get("billing_base_url"),
                 row.get("billing_mode"),
+            )
+            row["billing_base_url"] = _dashboard_safe_url_detail(row.get("billing_base_url"))
+            row["billing_account_label"] = _dashboard_account_label(
+                row.get("billing_credential_id"),
+                row.get("billing_credential_label"),
             )
             row.update({
                 "serving_provider": source_info["provider"],
@@ -2835,19 +2881,24 @@ async def get_usage_analytics(days: int = 30):
 
         for row in by_model:
             model_rows = model_source_map.get(row.get("model") or "(unknown)", [])
-            source_totals: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+            source_totals: Dict[Tuple[str, str, str, str, str, str], Dict[str, Any]] = {}
             for item in model_rows:
                 key = (
                     item.get("source") or "unknown",
                     item.get("billing_provider") or "",
                     item.get("billing_base_url") or "",
                     item.get("billing_mode") or "",
+                    item.get("billing_credential_id") or "",
+                    item.get("billing_credential_label") or "",
                 )
                 agg = source_totals.setdefault(key, {
                     "source": key[0],
                     "billing_provider": key[1],
                     "billing_base_url": key[2],
                     "billing_mode": key[3],
+                    "billing_credential_id": key[4],
+                    "billing_credential_label": key[5],
+                    "billing_account_label": item.get("billing_account_label"),
                     "serving_provider": item.get("serving_provider"),
                     "serving_label": item.get("serving_label"),
                     "serving_detail": item.get("serving_detail"),

@@ -992,11 +992,35 @@ class TestNewEndpoints:
                 billing_provider="openai-codex",
                 billing_base_url="https://chatgpt.com/backend-api/codex",
                 billing_mode="subscription_included",
+                billing_credential_id="chatgpt-account-1",
+                billing_credential_label="ChatGPT account 1",
                 api_call_count=2,
             )
             db._conn.execute(
                 "UPDATE sessions SET started_at=? WHERE id=?",
                 (now, "analytics-source-openai"),
+            )
+
+            db.create_session(
+                session_id="analytics-source-openai-second-account",
+                source="slack",
+                model="gpt-5.5",
+            )
+            db.update_token_counts(
+                "analytics-source-openai-second-account",
+                input_tokens=60,
+                output_tokens=30,
+                model="gpt-5.5",
+                billing_provider="openai-codex",
+                billing_base_url="https://chatgpt.com/backend-api/codex",
+                billing_mode="subscription_included",
+                billing_credential_id="chatgpt-account-2",
+                billing_credential_label="ChatGPT account 2",
+                api_call_count=1,
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?",
+                (now, "analytics-source-openai-second-account"),
             )
 
             db.create_session(
@@ -1010,7 +1034,7 @@ class TestNewEndpoints:
                 output_tokens=20,
                 model="google/gemma-4",
                 billing_provider="local",
-                billing_base_url="http://127.0.0.1:1234/v1",
+                billing_base_url="http://user:secret@100.90.235.67:1234/v1?api_key=hidden",
                 billing_mode="local",
                 api_call_count=1,
             )
@@ -1032,11 +1056,15 @@ class TestNewEndpoints:
         assert openai["source"] == "slack"
         assert openai["serving_label"] == "OpenAI Codex / ChatGPT subscription"
         assert openai["billing_mode_label"] == "subscription_included"
+        assert {item["billing_account_label"] for item in data["daily_breakdown"] if item["model"] == "gpt-5.5"} == {"ChatGPT account 1", "ChatGPT account 2"}
 
         gemma = next(item for item in data["daily_breakdown"] if item["model"] == "google/gemma-4")
         assert gemma["serving_label"] == "LM Studio (local)"
+        assert gemma["billing_base_url"] == "http://100.90.235.67:1234/v1"
+        assert gemma["serving_detail"] == "http://100.90.235.67:1234/v1"
 
         model = next(item for item in data["by_model"] if item["model"] == "gpt-5.5")
+        assert {item["billing_account_label"] for item in model["source_breakdown"]} == {"ChatGPT account 1", "ChatGPT account 2"}
         assert model["source_breakdown"][0]["source"] == "slack"
         assert model["source_breakdown"][0]["serving_label"] == "OpenAI Codex / ChatGPT subscription"
 

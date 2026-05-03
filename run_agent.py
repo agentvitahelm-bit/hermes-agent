@@ -6234,6 +6234,24 @@ class AIAgent:
         self._apply_client_headers_for_base_url(self.base_url)
         self._replace_primary_openai_client(reason="credential_rotation")
 
+    def _current_billing_credential_metadata(self) -> tuple[Optional[str], Optional[str]]:
+        """Return non-secret metadata for the active credential-pool entry."""
+        pool = getattr(self, "_credential_pool", None)
+        if pool is None:
+            return None, None
+        try:
+            entry = pool.current()
+        except Exception:
+            entry = None
+        if entry is None:
+            return None, None
+        credential_id = getattr(entry, "id", None)
+        credential_label = getattr(entry, "label", None) or credential_id
+        return (
+            str(credential_id) if credential_id else None,
+            str(credential_label) if credential_label else None,
+        )
+
     def _recover_with_credential_pool(
         self,
         *,
@@ -11715,6 +11733,7 @@ class AIAgent:
                         # deltas instead of double-counting them.
                         if self._session_db and self.session_id:
                             try:
+                                billing_credential_id, billing_credential_label = self._current_billing_credential_metadata()
                                 self._session_db.update_token_counts(
                                     self.session_id,
                                     input_tokens=canonical_usage.input_tokens,
@@ -11730,6 +11749,8 @@ class AIAgent:
                                     billing_base_url=self.base_url,
                                     billing_mode="subscription_included"
                                     if cost_result.status == "included" else None,
+                                    billing_credential_id=billing_credential_id,
+                                    billing_credential_label=billing_credential_label,
                                     model=self.model,
                                     api_call_count=1,
                                 )

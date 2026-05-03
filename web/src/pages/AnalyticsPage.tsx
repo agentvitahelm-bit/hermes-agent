@@ -260,6 +260,7 @@ function SourceBreakdownRows({ rows, colSpan, showDay = false }: { rows: Analyti
                 {showDay && <th className="px-3 py-2 text-left font-medium">{t.analytics.date}</th>}
                 <th className="px-3 py-2 text-left font-medium">{t.analytics.model}</th>
                 <th className="px-3 py-2 text-left font-medium">{t.analytics.source}</th>
+                <th className="px-3 py-2 text-left font-medium">{t.analytics.account}</th>
                 <th className="px-3 py-2 text-left font-medium">{t.analytics.serving}</th>
                 <th className="px-3 py-2 text-right font-medium">{t.sessions.title}</th>
                 <th className="px-3 py-2 text-right font-medium">{t.analytics.tokens}</th>
@@ -271,6 +272,14 @@ function SourceBreakdownRows({ rows, colSpan, showDay = false }: { rows: Analyti
                   {showDay && <td className="px-3 py-2 text-muted-foreground">{item.day ? formatDate(item.day) : "—"}</td>}
                   <td className="px-3 py-2"><span className="font-mono-ui text-[11px]">{item.model}</span></td>
                   <td className="px-3 py-2 text-muted-foreground">{item.source || "unknown"}</td>
+                  <td className="px-3 py-2">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-foreground/80">{item.billing_account_label || "—"}</span>
+                      {item.billing_credential_id && (
+                        <span className="font-mono-ui text-[10px] text-muted-foreground/70">{item.billing_credential_id}</span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-3 py-2"><SourceBadge item={item} /></td>
                   <td className="px-3 py-2 text-right text-muted-foreground">{item.sessions}</td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">
@@ -467,6 +476,7 @@ function CredentialPoolCard({ credentials }: { credentials: AnalyticsCredentialP
               </div>
               <div className="mt-3 space-y-1 text-xs text-muted-foreground">
                 <div>{t.analytics.serving}: <span className="text-foreground/80">{cred.serving_label}</span></div>
+                <div>{t.sessions.title}: <span className="text-foreground/80">{cred.request_count}</span></div>
                 {cred.base_url && <div className="font-mono-ui text-[10px] break-all">{t.analytics.endpoint}: {cred.base_url}</div>}
                 {cred.last_error_message && <div className="text-warning">{cred.last_error_code ?? ""} {cred.last_error_message}</div>}
               </div>

@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     billing_provider TEXT,
     billing_base_url TEXT,
     billing_mode TEXT,
+    billing_credential_id TEXT,
+    billing_credential_label TEXT,
     estimated_cost_usd REAL,
     actual_cost_usd REAL,
     cost_status TEXT,
@@ -600,6 +602,8 @@ class SessionDB:
         billing_provider: Optional[str] = None,
         billing_base_url: Optional[str] = None,
         billing_mode: Optional[str] = None,
+        billing_credential_id: Optional[str] = None,
+        billing_credential_label: Optional[str] = None,
         api_call_count: int = 0,
         absolute: bool = False,
     ) -> None:
@@ -630,6 +634,8 @@ class SessionDB:
                    billing_provider = COALESCE(billing_provider, ?),
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
+                   billing_credential_id = COALESCE(billing_credential_id, ?),
+                   billing_credential_label = COALESCE(billing_credential_label, ?),
                    model = COALESCE(model, ?),
                    api_call_count = ?
                    WHERE id = ?"""
@@ -651,6 +657,8 @@ class SessionDB:
                    billing_provider = COALESCE(billing_provider, ?),
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
+                   billing_credential_id = COALESCE(billing_credential_id, ?),
+                   billing_credential_label = COALESCE(billing_credential_label, ?),
                    model = COALESCE(model, ?),
                    api_call_count = COALESCE(api_call_count, 0) + ?
                    WHERE id = ?"""
@@ -669,6 +677,8 @@ class SessionDB:
             billing_provider,
             billing_base_url,
             billing_mode,
+            billing_credential_id,
+            billing_credential_label,
             model,
             api_call_count,
             session_id,
