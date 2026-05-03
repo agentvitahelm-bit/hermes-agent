@@ -11709,7 +11709,31 @@ class AIAgent:
                                 )
                             except Exception:
                                 pass  # never block the agent loop
-                        
+
+                        # Per-account, per-model token telemetry (deterministic,
+                        # persisted) — surfaces in /api/usage/credentials and the
+                        # in-chat 429 guidance message.
+                        try:
+                            from agent.credential_telemetry import get_telemetry
+                            pool = self._credential_pool
+                            if pool is not None:
+                                active = pool.current_entry() if hasattr(pool, "current_entry") else None
+                                account_id = str(getattr(active, "id", "") or "default")
+                                label = getattr(active, "label", None) or account_id
+                            else:
+                                account_id = "default"
+                                label = "default"
+                            get_telemetry().record_tokens(
+                                provider=self.provider or "unknown",
+                                account_id=account_id,
+                                model=self.model or "unknown",
+                                input_tokens=int(canonical_usage.input_tokens or 0),
+                                output_tokens=int(canonical_usage.output_tokens or 0),
+                                label=label,
+                            )
+                        except Exception:
+                            logger.debug("credential telemetry record_tokens failed", exc_info=True)
+
                         if self.verbose_logging:
                             logging.debug(f"Token usage: prompt={usage_dict['prompt_tokens']:,}, completion={usage_dict['completion_tokens']:,}, total={usage_dict['total_tokens']:,}")
                         
