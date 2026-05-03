@@ -6211,6 +6211,38 @@ class AIAgent:
         self._apply_client_headers_for_base_url(self.base_url)
         self._replace_primary_openai_client(reason="credential_rotation")
 
+    def _build_pool_guidance_message(self, *, fallback_active: bool) -> str:
+        """Compose the multi-line in-chat 429 guidance for the user."""
+        try:
+            from agent.credential_telemetry import get_telemetry
+            lines = get_telemetry().format_guidance_lines(
+                fallback_active=fallback_active,
+                primary_provider=self.provider,
+            )
+            return "\n".join(lines)
+        except Exception:
+            logger.debug("_build_pool_guidance_message failed", exc_info=True)
+            return ""
+
+    def _emit_pool_exhausted_guidance(self, *, status_code: Optional[int]) -> None:
+        """Print the credential-pool guidance once per exhaustion failure.
+
+        Gated by ``self._guidance_printed_for_failure_id`` so multi-retry
+        loops don't spam the user.
+        """
+        try:
+            failure_id = (status_code, getattr(self, "_fallback_activated", False))
+            if getattr(self, "_guidance_printed_for_failure_id", None) == failure_id:
+                return
+            msg = self._build_pool_guidance_message(
+                fallback_active=getattr(self, "_fallback_activated", False),
+            )
+            if msg:
+                self._vprint(msg, force=True)
+            self._guidance_printed_for_failure_id = failure_id
+        except Exception:
+            logger.debug("_emit_pool_exhausted_guidance failed", exc_info=True)
+
     def _recover_with_credential_pool(
         self,
         *,
@@ -6257,6 +6289,7 @@ class AIAgent:
                 )
                 self._swap_credential(next_entry)
                 return True, False
+            self._emit_pool_exhausted_guidance(status_code=rotate_status)
             return False, has_retried_429
 
         if effective_reason == FailoverReason.rate_limit:
@@ -6272,6 +6305,7 @@ class AIAgent:
                 )
                 self._swap_credential(next_entry)
                 return True, False
+            self._emit_pool_exhausted_guidance(status_code=rotate_status)
             return False, True
 
         if effective_reason == FailoverReason.auth:
