@@ -1049,6 +1049,17 @@ def get_auxiliary_models():
         raise HTTPException(status_code=500, detail="Failed to read auxiliary config")
 
 
+@app.get("/api/usage/credentials")
+def api_usage_credentials():
+    """Per-account cooldown counts + per-model token usage telemetry."""
+    try:
+        from agent.credential_telemetry import get_telemetry
+        return get_telemetry().snapshot()
+    except Exception:
+        _log.exception("GET /api/usage/credentials failed")
+        raise HTTPException(status_code=500, detail="Failed to read credential telemetry")
+
+
 @app.post("/api/model/set")
 async def set_model_assignment(body: ModelAssignment):
     """Assign a model to the main slot or an auxiliary task slot.

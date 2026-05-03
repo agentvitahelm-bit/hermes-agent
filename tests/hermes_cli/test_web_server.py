@@ -125,6 +125,16 @@ class TestWebServerEndpoints:
         assert "hermes_home" in data
         assert "active_sessions" in data
 
+    def test_get_usage_credentials(self):
+        """/api/usage/credentials returns the telemetry snapshot."""
+        resp = self.client.get("/api/usage/credentials")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, dict)
+        assert "schema_version" in data
+        assert "accounts" in data
+        assert isinstance(data["accounts"], dict)
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import hermes_cli.web_server as web_server
