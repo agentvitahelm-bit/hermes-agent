@@ -972,6 +972,61 @@ class TestNewEndpoints:
             "top_skills": [],
         }
 
+    def test_analytics_usage_day_breakdown(self):
+        """Hourly + per-model drill-down for a single day matches the daily totals."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            ts = 1746230400  # 2025-05-03 00:00:00 UTC
+            db.create_session(
+                session_id="day-bd-a",
+                source="cli",
+                model="anthropic/claude-sonnet-4",
+            )
+            db.create_session(
+                session_id="day-bd-b",
+                source="cli",
+                model="openai/gpt-5",
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?",
+                (ts + 3 * 3600, "day-bd-a"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?",
+                (ts + 14 * 3600, "day-bd-b"),
+            )
+            db._conn.commit()
+            db.update_token_counts("day-bd-a", input_tokens=1000, output_tokens=200)
+            db.update_token_counts("day-bd-b", input_tokens=4000, output_tokens=800)
+        finally:
+            db.close()
+
+        bad = self.client.get("/api/analytics/usage/day?date=not-a-date")
+        assert bad.status_code == 400
+
+        resp = self.client.get("/api/analytics/usage/day?date=2025-05-03")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["date"] == "2025-05-03"
+        assert isinstance(data["hourly"], list)
+        assert len(data["hourly"]) == 24
+        by_hour = {h["hour"]: h for h in data["hourly"]}
+        assert by_hour[3]["input_tokens"] == 1000
+        assert by_hour[3]["output_tokens"] == 200
+        assert by_hour[3]["sessions"] == 1
+        assert by_hour[14]["input_tokens"] == 4000
+        assert by_hour[14]["sessions"] == 1
+        assert by_hour[0]["sessions"] == 0
+        assert by_hour[0]["input_tokens"] == 0
+        models = [m["model"] for m in data["by_model"]]
+        assert models[0] == "openai/gpt-5"
+        assert "anthropic/claude-sonnet-4" in models
+        assert data["totals"]["input_tokens"] == 5000
+        assert data["totals"]["output_tokens"] == 1000
+        assert data["totals"]["sessions"] == 2
+
     def test_analytics_usage_includes_model_source_breakdown(self):
         import time
         from hermes_state import SessionDB

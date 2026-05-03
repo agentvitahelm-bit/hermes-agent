@@ -21,6 +21,7 @@ import type {
   AnalyticsSkillEntry,
   AnalyticsSourceBreakdownEntry,
   AnalyticsCredentialPoolEntry,
+  AnalyticsDayBreakdown,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -297,6 +298,138 @@ function SourceBreakdownRows({ rows, colSpan, showDay = false }: { rows: Analyti
   );
 }
 
+function DayDetail({ date }: { date: string }) {
+  const { t } = useI18n();
+  const [data, setData] = useState<AnalyticsDayBreakdown | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .getAnalyticsDay(date)
+      .then((d) => {
+        if (!cancelled) setData(d);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [date]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-6">
+        <Spinner className="text-primary" />
+      </div>
+    );
+  }
+  if (error) return <p className="py-3 text-xs text-destructive">{error}</p>;
+  if (!data) return null;
+
+  const maxHourly = Math.max(
+    ...data.hourly.map((h) => h.input_tokens + h.output_tokens),
+    1,
+  );
+  const totalTokens = data.totals.input_tokens + data.totals.output_tokens;
+
+  return (
+    <div className="flex flex-col gap-4 py-3">
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="text-xs font-medium text-muted-foreground">
+            Hour-by-hour (UTC) — total {formatTokens(totalTokens)} tokens across {data.totals.sessions} sessions
+          </div>
+          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <div className="h-2 w-2 bg-[#ffe6cb]" />
+              {t.analytics.input}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="h-2 w-2 bg-emerald-500" />
+              {t.analytics.output}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-end gap-[2px]" style={{ height: 96 }}>
+          {data.hourly.map((h) => {
+            const total = h.input_tokens + h.output_tokens;
+            const inputH = Math.round((h.input_tokens / maxHourly) * 96);
+            const outputH = Math.round((h.output_tokens / maxHourly) * 96);
+            return (
+              <div key={h.hour} className="group relative flex min-w-0 flex-1 flex-col justify-end" style={{ height: 96 }}>
+                <div className="absolute bottom-full left-1/2 z-10 mb-2 hidden -translate-x-1/2 pointer-events-none group-hover:block">
+                  <div className="whitespace-nowrap border border-border bg-card px-2.5 py-1.5 text-[10px] text-foreground shadow-lg">
+                    <div className="font-medium">{String(h.hour).padStart(2, "0")}:00 UTC</div>
+                    <div>{t.analytics.input}: {formatTokens(h.input_tokens)}</div>
+                    <div>{t.analytics.output}: {formatTokens(h.output_tokens)}</div>
+                    <div>{t.analytics.total}: {formatTokens(total)}</div>
+                    <div>{t.sessions.title}: {h.sessions} · API calls: {h.api_calls}</div>
+                  </div>
+                </div>
+                <div className="w-full bg-[#ffe6cb]/70" style={{ height: Math.max(inputH, total > 0 ? 1 : 0) }} />
+                <div className="w-full bg-emerald-500/70" style={{ height: Math.max(outputH, h.output_tokens > 0 ? 1 : 0) }} />
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+          <span>00</span>
+          <span>06</span>
+          <span>12</span>
+          <span>18</span>
+          <span>23</span>
+        </div>
+      </div>
+
+      {data.by_model.length > 0 && (
+        <div>
+          <div className="mb-2 text-xs font-medium text-muted-foreground">
+            Per-model usage on {formatDate(data.date)}
+          </div>
+          <div className="overflow-x-auto rounded border border-border/60 bg-card/40">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border/50 text-muted-foreground">
+                  <th className="px-3 py-2 text-left font-medium">{t.analytics.model}</th>
+                  <th className="px-3 py-2 text-right font-medium">{t.sessions.title}</th>
+                  <th className="px-3 py-2 text-right font-medium">API calls</th>
+                  <th className="px-3 py-2 text-right font-medium">{t.analytics.input}</th>
+                  <th className="px-3 py-2 text-right font-medium">{t.analytics.output}</th>
+                  <th className="px-3 py-2 text-right font-medium">Share</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.by_model.map((m) => {
+                  const mTotal = m.input_tokens + m.output_tokens;
+                  const share = totalTokens > 0 ? Math.round((mTotal / totalTokens) * 100) : 0;
+                  return (
+                    <tr key={m.model} className="border-b border-border/30 last:border-b-0">
+                      <td className="px-3 py-2"><span className="font-mono-ui text-[11px]">{m.model}</span></td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">{m.sessions}</td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">{m.api_calls}</td>
+                      <td className="px-3 py-2 text-right"><span className="text-[#ffe6cb]">{formatTokens(m.input_tokens)}</span></td>
+                      <td className="px-3 py-2 text-right"><span className="text-emerald-400">{formatTokens(m.output_tokens)}</span></td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">{share}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DailyTable({ daily, breakdown }: { daily: AnalyticsDailyEntry[]; breakdown: AnalyticsSourceBreakdownEntry[] }) {
   const { t } = useI18n();
   const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set());
@@ -363,6 +496,13 @@ function DailyTable({ daily, breakdown }: { daily: AnalyticsDailyEntry[]; breakd
                       <td className="text-right py-2 px-4"><span className="text-[#ffe6cb]">{formatTokens(d.input_tokens)}</span></td>
                       <td className="text-right py-2 pl-4"><span className="text-emerald-400">{formatTokens(d.output_tokens)}</span></td>
                     </tr>
+                    {expanded && (
+                      <tr className="border-b border-border/50 bg-secondary/10">
+                        <td colSpan={5} className="px-4">
+                          <DayDetail date={d.day} />
+                        </td>
+                      </tr>
+                    )}
                     {expanded && <SourceBreakdownRows rows={childRows} colSpan={5} />}
                   </Fragment>
                 );

@@ -2956,6 +2956,109 @@ async def get_usage_analytics(days: int = 30):
         db.close()
 
 
+@app.get("/api/analytics/usage/day")
+async def get_usage_day_breakdown(date: str):
+    """Hour-by-hour and per-model breakdown for a single calendar day.
+
+    ``date`` is a YYYY-MM-DD string interpreted in UTC, matching the bucketing
+    used by ``GET /api/analytics/usage`` (which groups by
+    ``date(started_at, 'unixepoch')``). This keeps the drill-down totals
+    consistent with the daily summary numbers the table is expanded from.
+    """
+    import re
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date or ""):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        cur = db._conn.execute(
+            """
+            SELECT CAST(strftime('%H', started_at, 'unixepoch') AS INTEGER) AS hour,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost,
+                   COUNT(*) AS sessions,
+                   COALESCE(SUM(api_call_count), 0) AS api_calls
+            FROM sessions
+            WHERE date(started_at, 'unixepoch') = ?
+            GROUP BY hour
+            ORDER BY hour
+            """,
+            (date,),
+        )
+        rows = {r["hour"]: dict(r) for r in cur.fetchall()}
+
+        hourly = []
+        for h in range(24):
+            r = rows.get(h)
+            if r is None:
+                hourly.append({
+                    "hour": h,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "estimated_cost": 0.0,
+                    "actual_cost": 0.0,
+                    "sessions": 0,
+                    "api_calls": 0,
+                })
+            else:
+                hourly.append(r)
+
+        cur2 = db._conn.execute(
+            """
+            SELECT COALESCE(model, '(unknown)') AS model,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost,
+                   COUNT(*) AS sessions,
+                   COALESCE(SUM(api_call_count), 0) AS api_calls
+            FROM sessions
+            WHERE date(started_at, 'unixepoch') = ?
+            GROUP BY model
+            ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
+            """,
+            (date,),
+        )
+        by_model = [dict(r) for r in cur2.fetchall()]
+
+        cur3 = db._conn.execute(
+            """
+            SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost,
+                   COUNT(*) AS sessions,
+                   COALESCE(SUM(api_call_count), 0) AS api_calls
+            FROM sessions
+            WHERE date(started_at, 'unixepoch') = ?
+            """,
+            (date,),
+        )
+        totals = dict(cur3.fetchone())
+
+        return {
+            "date": date,
+            "hourly": hourly,
+            "by_model": by_model,
+            "totals": totals,
+        }
+    finally:
+        db.close()
+
+
 @app.get("/api/analytics/models")
 async def get_models_analytics(days: int = 30):
     """Rich per-model analytics for the Models dashboard page.

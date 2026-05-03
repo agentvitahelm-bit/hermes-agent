@@ -63,6 +63,10 @@ export const api = {
   },
   getAnalytics: (days: number) =>
     fetchJSON<AnalyticsResponse>(`/api/analytics/usage?days=${days}`),
+  getAnalyticsDay: (date: string) =>
+    fetchJSON<AnalyticsDayBreakdown>(
+      `/api/analytics/usage/day?date=${encodeURIComponent(date)}`,
+    ),
   getModelsAnalytics: (days: number) =>
     fetchJSON<ModelsAnalyticsResponse>(`/api/analytics/models?days=${days}`),
   getConfig: () => fetchJSON<Record<string, unknown>>("/api/config"),
@@ -476,6 +480,46 @@ export interface AnalyticsCredentialPoolEntry {
   last_error_reset_at: number | null;
   base_url: string;
   serving_label: string;
+}
+
+export interface AnalyticsHourlyEntry {
+  hour: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  reasoning_tokens: number;
+  estimated_cost: number;
+  actual_cost: number;
+  sessions: number;
+  api_calls: number;
+}
+
+export interface AnalyticsDayModelEntry {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  reasoning_tokens: number;
+  estimated_cost: number;
+  actual_cost: number;
+  sessions: number;
+  api_calls: number;
+}
+
+export interface AnalyticsDayBreakdown {
+  date: string;
+  hourly: AnalyticsHourlyEntry[];
+  by_model: AnalyticsDayModelEntry[];
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    reasoning_tokens: number;
+    estimated_cost: number;
+    actual_cost: number;
+    sessions: number;
+    api_calls: number;
+  };
 }
 
 export interface AnalyticsSkillEntry {
