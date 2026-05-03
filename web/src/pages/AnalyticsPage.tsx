@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
   BarChart3,
   Brain,
+  ChevronDown,
+  ChevronRight,
   Cpu,
   RefreshCw,
   TrendingUp,
@@ -15,6 +17,7 @@ import type {
   AnalyticsDailyEntry,
   AnalyticsModelEntry,
   AnalyticsSkillEntry,
+  AnalyticsDayBreakdown,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -221,11 +224,201 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
   );
 }
 
+function DayDetail({ date }: { date: string }) {
+  const [data, setData] = useState<AnalyticsDayBreakdown | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .getAnalyticsDay(date)
+      .then((d) => {
+        if (!cancelled) setData(d);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [date]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-6">
+        <Spinner className="text-primary" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <p className="text-xs text-destructive py-3">{error}</p>
+    );
+  }
+  if (!data) return null;
+
+  const maxHourly = Math.max(
+    ...data.hourly.map((h) => h.input_tokens + h.output_tokens),
+    1,
+  );
+  const totalTokens =
+    data.totals.input_tokens + data.totals.output_tokens;
+
+  return (
+    <div className="flex flex-col gap-4 py-3">
+      {/* Hourly chart */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-medium text-muted-foreground">
+            Hour-by-hour (UTC) — total {formatTokens(totalTokens)} tokens across{" "}
+            {data.totals.sessions} sessions
+          </div>
+          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <div className="h-2 w-2 bg-[#ffe6cb]" />
+              input
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="h-2 w-2 bg-emerald-500" />
+              output
+            </div>
+          </div>
+        </div>
+        <div
+          className="flex items-end gap-[2px]"
+          style={{ height: 96 }}
+        >
+          {data.hourly.map((h) => {
+            const total = h.input_tokens + h.output_tokens;
+            const inputH = Math.round((h.input_tokens / maxHourly) * 96);
+            const outputH = Math.round((h.output_tokens / maxHourly) * 96);
+            return (
+              <div
+                key={h.hour}
+                className="flex-1 min-w-0 group relative flex flex-col justify-end"
+                style={{ height: 96 }}
+              >
+                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 pointer-events-none">
+                  <div className="bg-card border border-border px-2.5 py-1.5 text-[10px] text-foreground shadow-lg whitespace-nowrap">
+                    <div className="font-medium">
+                      {String(h.hour).padStart(2, "0")}:00 UTC
+                    </div>
+                    <div>input: {formatTokens(h.input_tokens)}</div>
+                    <div>output: {formatTokens(h.output_tokens)}</div>
+                    <div>total: {formatTokens(total)}</div>
+                    <div>
+                      sessions: {h.sessions} · API calls: {h.api_calls}
+                    </div>
+                  </div>
+                </div>
+                <div
+                  className="w-full bg-[#ffe6cb]/70"
+                  style={{ height: Math.max(inputH, total > 0 ? 1 : 0) }}
+                />
+                <div
+                  className="w-full bg-emerald-500/70"
+                  style={{
+                    height: Math.max(outputH, h.output_tokens > 0 ? 1 : 0),
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex justify-between mt-1 text-[10px] text-muted-foreground">
+          <span>00</span>
+          <span>06</span>
+          <span>12</span>
+          <span>18</span>
+          <span>23</span>
+        </div>
+      </div>
+
+      {/* Per-model breakdown for the day */}
+      {data.by_model.length > 0 && (
+        <div>
+          <div className="text-xs font-medium text-muted-foreground mb-2">
+            Per-model usage on {formatDate(data.date)}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border text-muted-foreground">
+                  <th className="text-left py-1.5 pr-4 font-medium">Model</th>
+                  <th className="text-right py-1.5 px-3 font-medium">Sessions</th>
+                  <th className="text-right py-1.5 px-3 font-medium">API calls</th>
+                  <th className="text-right py-1.5 px-3 font-medium">Input</th>
+                  <th className="text-right py-1.5 px-3 font-medium">Output</th>
+                  <th className="text-right py-1.5 pl-3 font-medium">Share</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.by_model.map((m) => {
+                  const mTotal = m.input_tokens + m.output_tokens;
+                  const share =
+                    totalTokens > 0
+                      ? Math.round((mTotal / totalTokens) * 100)
+                      : 0;
+                  return (
+                    <tr
+                      key={m.model}
+                      className="border-b border-border/50"
+                    >
+                      <td className="py-1.5 pr-4">
+                        <span className="font-mono-ui">{m.model}</span>
+                      </td>
+                      <td className="text-right py-1.5 px-3 text-muted-foreground">
+                        {m.sessions}
+                      </td>
+                      <td className="text-right py-1.5 px-3 text-muted-foreground">
+                        {m.api_calls}
+                      </td>
+                      <td className="text-right py-1.5 px-3">
+                        <span className="text-[#ffe6cb]">
+                          {formatTokens(m.input_tokens)}
+                        </span>
+                      </td>
+                      <td className="text-right py-1.5 px-3">
+                        <span className="text-emerald-400">
+                          {formatTokens(m.output_tokens)}
+                        </span>
+                      </td>
+                      <td className="text-right py-1.5 pl-3 text-muted-foreground">
+                        {share}%
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
   const { t } = useI18n();
   const { sorted, sortKey, sortDir, toggle } = useTableSort(daily, "day", "desc");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   if (daily.length === 0) return null;
+
+  const toggleExpanded = (day: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(day)) next.delete(day);
+      else next.add(day);
+      return next;
+    });
+  };
 
   return (
     <Card>
@@ -242,6 +435,7 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-muted-foreground text-xs">
+                <th className="w-6" />
                 <SortHeader label={t.analytics.date} col="day" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
                 <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
                 <SortHeader label={t.analytics.input} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
@@ -249,29 +443,48 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
               </tr>
             </thead>
             <tbody>
-              {sorted.map((d) => (
-                <tr
-                    key={d.day}
-                    className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
-                  >
-                  <td className="py-2 pr-4 font-medium">
-                      {formatDate(d.day)}
-                    </td>
-                  <td className="text-right py-2 px-4 text-muted-foreground">
-                      {d.sessions}
-                    </td>
-                  <td className="text-right py-2 px-4">
-                    <span className="text-[#ffe6cb]">
-                        {formatTokens(d.input_tokens)}
-                      </span>
-                  </td>
-                  <td className="text-right py-2 pl-4">
-                    <span className="text-emerald-400">
-                        {formatTokens(d.output_tokens)}
-                      </span>
-                  </td>
-                </tr>
-              ))}
+              {sorted.map((d) => {
+                const isOpen = expanded.has(d.day);
+                return (
+                  <Fragment key={d.day}>
+                    <tr
+                      onClick={() => toggleExpanded(d.day)}
+                      className="border-b border-border/50 hover:bg-secondary/20 transition-colors cursor-pointer"
+                    >
+                      <td className="py-2 pl-2 pr-1 align-middle text-muted-foreground">
+                        {isOpen ? (
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 font-medium">
+                        {formatDate(d.day)}
+                      </td>
+                      <td className="text-right py-2 px-4 text-muted-foreground">
+                        {d.sessions}
+                      </td>
+                      <td className="text-right py-2 px-4">
+                        <span className="text-[#ffe6cb]">
+                          {formatTokens(d.input_tokens)}
+                        </span>
+                      </td>
+                      <td className="text-right py-2 pl-4">
+                        <span className="text-emerald-400">
+                          {formatTokens(d.output_tokens)}
+                        </span>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="border-b border-border/50 bg-secondary/10">
+                        <td colSpan={5} className="px-4">
+                          <DayDetail date={d.day} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
