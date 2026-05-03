@@ -2689,6 +2689,73 @@ async def update_config_raw(body: RawConfigUpdate):
         raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 
 
+
+
+def _dashboard_display_billing_source(provider: str | None, base_url: str | None, billing_mode: str | None) -> Dict[str, str]:
+    """Human-readable serving/billing labels for dashboard analytics."""
+    provider_lc = (provider or "").strip().lower()
+    base = (base_url or "").strip()
+    base_lc = base.lower()
+    mode = (billing_mode or "").strip()
+
+    if "lmstudio" in provider_lc or "lmstudio" in base_lc or "localhost:1234" in base_lc or "127.0.0.1:1234" in base_lc:
+        return {"provider": provider_lc or "local", "label": "LM Studio (local)", "detail": base, "billing_mode": mode or "local"}
+    if provider_lc == "openai-codex":
+        return {"provider": "openai-codex", "label": "OpenAI Codex / ChatGPT subscription", "detail": base, "billing_mode": mode or "subscription_included"}
+    if provider_lc == "anthropic":
+        label = "Anthropic API"
+        if mode == "subscription_included":
+            label = "Anthropic subscription"
+        return {"provider": "anthropic", "label": label, "detail": base, "billing_mode": mode}
+    if provider_lc == "openrouter" or "openrouter.ai" in base_lc:
+        return {"provider": "openrouter", "label": "OpenRouter", "detail": base, "billing_mode": mode}
+    if provider_lc in {"custom", "local"} or "localhost" in base_lc or "127.0.0.1" in base_lc:
+        return {"provider": provider_lc or "local", "label": "Local/custom endpoint", "detail": base, "billing_mode": mode or "unknown"}
+    label = provider_lc or "Unknown provider"
+    return {"provider": provider_lc, "label": label, "detail": base, "billing_mode": mode}
+
+
+def _dashboard_credential_pool_summary() -> List[Dict[str, Any]]:
+    """Summarize configured credential-pool accounts without exposing secrets."""
+    try:
+        from hermes_cli.auth import read_credential_pool, provider_display_name
+    except Exception:
+        return []
+
+    try:
+        pool = read_credential_pool(None)
+    except Exception:
+        return []
+
+    summaries: List[Dict[str, Any]] = []
+    if not isinstance(pool, dict):
+        return summaries
+
+    for provider, entries in sorted(pool.items()):
+        if not isinstance(entries, list) or not entries:
+            continue
+        for idx, entry in enumerate(sorted(entries, key=lambda e: e.get("priority", 9999) if isinstance(e, dict) else 9999), start=1):
+            if not isinstance(entry, dict):
+                continue
+            base_url = entry.get("base_url") or ""
+            source_info = _dashboard_display_billing_source(provider, base_url, None)
+            summaries.append({
+                "provider": provider,
+                "provider_label": provider_display_name(provider) if provider else provider,
+                "ordinal": idx,
+                "id": str(entry.get("id") or ""),
+                "label": str(entry.get("label") or f"account {idx}"),
+                "source": str(entry.get("source") or ""),
+                "auth_type": str(entry.get("auth_type") or ""),
+                "status": str(entry.get("last_status") or "ok"),
+                "last_error_code": entry.get("last_error_code"),
+                "last_error_message": entry.get("last_error_message"),
+                "last_error_reset_at": entry.get("last_error_reset_at"),
+                "base_url": base_url,
+                "serving_label": source_info["label"],
+            })
+    return summaries
+
 # ---------------------------------------------------------------------------
 # Token / cost analytics endpoint
 # ---------------------------------------------------------------------------
@@ -2729,6 +2796,79 @@ async def get_usage_analytics(days: int = 30):
         """, (cutoff,))
         by_model = [dict(r) for r in cur2.fetchall()]
 
+        cur_breakdown = db._conn.execute("""
+            SELECT date(started_at, 'unixepoch') as day,
+                   COALESCE(model, '(unknown)') as model,
+                   COALESCE(source, 'unknown') as source,
+                   COALESCE(billing_provider, '') as billing_provider,
+                   COALESCE(billing_base_url, '') as billing_base_url,
+                   COALESCE(billing_mode, '') as billing_mode,
+                   SUM(input_tokens) as input_tokens,
+                   SUM(output_tokens) as output_tokens,
+                   SUM(cache_read_tokens) as cache_read_tokens,
+                   SUM(reasoning_tokens) as reasoning_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
+                   COUNT(*) as sessions,
+                   SUM(COALESCE(api_call_count, 0)) as api_calls
+            FROM sessions WHERE started_at > ?
+            GROUP BY day, model, source, billing_provider, billing_base_url, billing_mode
+            ORDER BY day DESC, SUM(input_tokens) + SUM(output_tokens) DESC
+        """, (cutoff,))
+        daily_breakdown = []
+        model_source_map: Dict[str, List[Dict[str, Any]]] = {}
+        for r in cur_breakdown.fetchall():
+            row = dict(r)
+            source_info = _dashboard_display_billing_source(
+                row.get("billing_provider"),
+                row.get("billing_base_url"),
+                row.get("billing_mode"),
+            )
+            row.update({
+                "serving_provider": source_info["provider"],
+                "serving_label": source_info["label"],
+                "serving_detail": source_info["detail"],
+                "billing_mode_label": source_info["billing_mode"],
+            })
+            daily_breakdown.append(row)
+            model_source_map.setdefault(row["model"], []).append(dict(row))
+
+        for row in by_model:
+            model_rows = model_source_map.get(row.get("model") or "(unknown)", [])
+            source_totals: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+            for item in model_rows:
+                key = (
+                    item.get("source") or "unknown",
+                    item.get("billing_provider") or "",
+                    item.get("billing_base_url") or "",
+                    item.get("billing_mode") or "",
+                )
+                agg = source_totals.setdefault(key, {
+                    "source": key[0],
+                    "billing_provider": key[1],
+                    "billing_base_url": key[2],
+                    "billing_mode": key[3],
+                    "serving_provider": item.get("serving_provider"),
+                    "serving_label": item.get("serving_label"),
+                    "serving_detail": item.get("serving_detail"),
+                    "billing_mode_label": item.get("billing_mode_label"),
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "estimated_cost": 0,
+                    "actual_cost": 0,
+                    "sessions": 0,
+                    "api_calls": 0,
+                })
+                for field in ("input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens", "estimated_cost", "actual_cost", "sessions", "api_calls"):
+                    agg[field] += item.get(field) or 0
+            row["source_breakdown"] = sorted(
+                source_totals.values(),
+                key=lambda x: (x.get("input_tokens") or 0) + (x.get("output_tokens") or 0),
+                reverse=True,
+            )
+
         cur3 = db._conn.execute("""
             SELECT SUM(input_tokens) as total_input,
                    SUM(output_tokens) as total_output,
@@ -2754,7 +2894,9 @@ async def get_usage_analytics(days: int = 30):
 
         return {
             "daily": daily,
+            "daily_breakdown": daily_breakdown,
             "by_model": by_model,
+            "credential_pool": _dashboard_credential_pool_summary(),
             "totals": totals,
             "period_days": days,
             "skills": skills,

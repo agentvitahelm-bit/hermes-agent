@@ -427,6 +427,27 @@ export interface AnalyticsDailyEntry {
   api_calls: number;
 }
 
+export interface AnalyticsSourceBreakdownEntry {
+  day?: string;
+  model: string;
+  source: string;
+  billing_provider: string;
+  billing_base_url: string;
+  billing_mode: string;
+  serving_provider: string;
+  serving_label: string;
+  serving_detail: string;
+  billing_mode_label: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  reasoning_tokens: number;
+  estimated_cost: number;
+  actual_cost: number;
+  sessions: number;
+  api_calls: number;
+}
+
 export interface AnalyticsModelEntry {
   model: string;
   input_tokens: number;
@@ -434,6 +455,23 @@ export interface AnalyticsModelEntry {
   estimated_cost: number;
   sessions: number;
   api_calls: number;
+  source_breakdown?: AnalyticsSourceBreakdownEntry[];
+}
+
+export interface AnalyticsCredentialPoolEntry {
+  provider: string;
+  provider_label: string;
+  ordinal: number;
+  id: string;
+  label: string;
+  source: string;
+  auth_type: string;
+  status: string;
+  last_error_code: number | null;
+  last_error_message: string | null;
+  last_error_reset_at: number | null;
+  base_url: string;
+  serving_label: string;
 }
 
 export interface AnalyticsSkillEntry {
@@ -454,7 +492,9 @@ export interface AnalyticsSkillsSummary {
 
 export interface AnalyticsResponse {
   daily: AnalyticsDailyEntry[];
+  daily_breakdown: AnalyticsSourceBreakdownEntry[];
   by_model: AnalyticsModelEntry[];
+  credential_pool: AnalyticsCredentialPoolEntry[];
   totals: {
     total_input: number;
     total_output: number;

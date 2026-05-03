@@ -972,6 +972,74 @@ class TestNewEndpoints:
             "top_skills": [],
         }
 
+    def test_analytics_usage_includes_model_source_breakdown(self):
+        import time
+        from hermes_state import SessionDB
+
+        now = time.time()
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id="analytics-source-openai",
+                source="slack",
+                model="gpt-5.5",
+            )
+            db.update_token_counts(
+                "analytics-source-openai",
+                input_tokens=100,
+                output_tokens=40,
+                model="gpt-5.5",
+                billing_provider="openai-codex",
+                billing_base_url="https://chatgpt.com/backend-api/codex",
+                billing_mode="subscription_included",
+                api_call_count=2,
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?",
+                (now, "analytics-source-openai"),
+            )
+
+            db.create_session(
+                session_id="analytics-source-lmstudio",
+                source="tui",
+                model="google/gemma-4",
+            )
+            db.update_token_counts(
+                "analytics-source-lmstudio",
+                input_tokens=80,
+                output_tokens=20,
+                model="google/gemma-4",
+                billing_provider="local",
+                billing_base_url="http://127.0.0.1:1234/v1",
+                billing_mode="local",
+                api_call_count=1,
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?",
+                (now, "analytics-source-lmstudio"),
+            )
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/analytics/usage?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert "daily_breakdown" in data
+        assert "credential_pool" in data
+        openai = next(item for item in data["daily_breakdown"] if item["model"] == "gpt-5.5")
+        assert openai["source"] == "slack"
+        assert openai["serving_label"] == "OpenAI Codex / ChatGPT subscription"
+        assert openai["billing_mode_label"] == "subscription_included"
+
+        gemma = next(item for item in data["daily_breakdown"] if item["model"] == "google/gemma-4")
+        assert gemma["serving_label"] == "LM Studio (local)"
+
+        model = next(item for item in data["by_model"] if item["model"] == "gpt-5.5")
+        assert model["source_breakdown"][0]["source"] == "slack"
+        assert model["source_breakdown"][0]["serving_label"] == "OpenAI Codex / ChatGPT subscription"
+
     def test_analytics_usage_includes_skill_breakdown(self):
         from hermes_state import SessionDB
 

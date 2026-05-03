@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
   BarChart3,
   Brain,
+  ChevronDown,
+  ChevronRight,
   Cpu,
+  KeyRound,
   RefreshCw,
+  Server,
   TrendingUp,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -15,6 +19,8 @@ import type {
   AnalyticsDailyEntry,
   AnalyticsModelEntry,
   AnalyticsSkillEntry,
+  AnalyticsSourceBreakdownEntry,
+  AnalyticsCredentialPoolEntry,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -221,9 +227,81 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
   );
 }
 
-function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
+
+function SourceBadge({ item }: { item: AnalyticsSourceBreakdownEntry }) {
+  const provider = item.billing_provider || item.serving_provider || "unknown";
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge tone="secondary" className="text-[10px]">{item.serving_label || provider}</Badge>
+        {item.billing_mode_label && (
+          <span className="text-[10px] text-muted-foreground">{item.billing_mode_label}</span>
+        )}
+      </div>
+      {item.serving_detail && (
+        <span className="font-mono-ui text-[10px] text-muted-foreground/70 break-all">
+          {item.serving_detail}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SourceBreakdownRows({ rows, colSpan, showDay = false }: { rows: AnalyticsSourceBreakdownEntry[]; colSpan: number; showDay?: boolean }) {
   const { t } = useI18n();
+  if (rows.length === 0) return null;
+  return (
+    <tr className="border-b border-border/50 bg-secondary/10">
+      <td colSpan={colSpan} className="px-4 py-3">
+        <div className="overflow-x-auto rounded border border-border/60 bg-card/40">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border/50 text-muted-foreground">
+                {showDay && <th className="px-3 py-2 text-left font-medium">{t.analytics.date}</th>}
+                <th className="px-3 py-2 text-left font-medium">{t.analytics.model}</th>
+                <th className="px-3 py-2 text-left font-medium">{t.analytics.source}</th>
+                <th className="px-3 py-2 text-left font-medium">{t.analytics.serving}</th>
+                <th className="px-3 py-2 text-right font-medium">{t.sessions.title}</th>
+                <th className="px-3 py-2 text-right font-medium">{t.analytics.tokens}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((item, idx) => (
+                <tr key={`${item.day ?? "all"}-${item.model}-${item.source}-${item.billing_provider}-${idx}`} className="border-b border-border/30 last:border-b-0">
+                  {showDay && <td className="px-3 py-2 text-muted-foreground">{item.day ? formatDate(item.day) : "—"}</td>}
+                  <td className="px-3 py-2"><span className="font-mono-ui text-[11px]">{item.model}</span></td>
+                  <td className="px-3 py-2 text-muted-foreground">{item.source || "unknown"}</td>
+                  <td className="px-3 py-2"><SourceBadge item={item} /></td>
+                  <td className="px-3 py-2 text-right text-muted-foreground">{item.sessions}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                    <span className="text-[#ffe6cb]">{formatTokens(item.input_tokens)}</span>
+                    {" / "}
+                    <span className="text-emerald-400">{formatTokens(item.output_tokens)}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function DailyTable({ daily, breakdown }: { daily: AnalyticsDailyEntry[]; breakdown: AnalyticsSourceBreakdownEntry[] }) {
+  const { t } = useI18n();
+  const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set());
   const { sorted, sortKey, sortDir, toggle } = useTableSort(daily, "day", "desc");
+  const rowsByDay = useMemo(() => {
+    const map = new Map<string, AnalyticsSourceBreakdownEntry[]>();
+    for (const row of breakdown) {
+      if (!row.day) continue;
+      const rows = map.get(row.day) ?? [];
+      rows.push(row);
+      map.set(row.day, rows);
+    }
+    return map;
+  }, [breakdown]);
 
   if (daily.length === 0) return null;
 
@@ -242,6 +320,7 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-muted-foreground text-xs">
+                <th className="w-8 py-2 pr-2" />
                 <SortHeader label={t.analytics.date} col="day" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
                 <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
                 <SortHeader label={t.analytics.input} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
@@ -249,29 +328,36 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
               </tr>
             </thead>
             <tbody>
-              {sorted.map((d) => (
-                <tr
-                    key={d.day}
-                    className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
-                  >
-                  <td className="py-2 pr-4 font-medium">
-                      {formatDate(d.day)}
-                    </td>
-                  <td className="text-right py-2 px-4 text-muted-foreground">
-                      {d.sessions}
-                    </td>
-                  <td className="text-right py-2 px-4">
-                    <span className="text-[#ffe6cb]">
-                        {formatTokens(d.input_tokens)}
-                      </span>
-                  </td>
-                  <td className="text-right py-2 pl-4">
-                    <span className="text-emerald-400">
-                        {formatTokens(d.output_tokens)}
-                      </span>
-                  </td>
-                </tr>
-              ))}
+              {sorted.map((d) => {
+                const childRows = rowsByDay.get(d.day) ?? [];
+                const expanded = expandedDays.has(d.day);
+                return (
+                  <Fragment key={d.day}>
+                    <tr className="border-b border-border/50 hover:bg-secondary/20 transition-colors">
+                      <td className="py-2 pr-2">
+                        <button
+                          type="button"
+                          className="rounded p-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                          title={t.analytics.expandForSources}
+                          onClick={() => setExpandedDays((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(d.day)) next.delete(d.day);
+                            else next.add(d.day);
+                            return next;
+                          })}
+                        >
+                          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </button>
+                      </td>
+                      <td className="py-2 pr-4 font-medium">{formatDate(d.day)}</td>
+                      <td className="text-right py-2 px-4 text-muted-foreground">{d.sessions}</td>
+                      <td className="text-right py-2 px-4"><span className="text-[#ffe6cb]">{formatTokens(d.input_tokens)}</span></td>
+                      <td className="text-right py-2 pl-4"><span className="text-emerald-400">{formatTokens(d.output_tokens)}</span></td>
+                    </tr>
+                    {expanded && <SourceBreakdownRows rows={childRows} colSpan={5} />}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -282,6 +368,7 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
 
 function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
   const { t } = useI18n();
+  const [expandedModels, setExpandedModels] = useState<Set<string>>(new Set());
   const { sorted, sortKey, sortDir, toggle } = useTableSort(models, "input_tokens", "desc");
 
   if (models.length === 0) return null;
@@ -301,36 +388,90 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-muted-foreground text-xs">
+                <th className="w-8 py-2 pr-2" />
                 <SortHeader label={t.analytics.model} col="model" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
                 <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
                 <SortHeader label={t.analytics.tokens} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
               </tr>
             </thead>
             <tbody>
-              {sorted.map((m) => (
-                <tr
-                  key={m.model}
-                  className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
-                >
-                  <td className="py-2 pr-4">
-                    <span className="font-mono-ui text-xs">{m.model}</span>
-                  </td>
-                  <td className="text-right py-2 px-4 text-muted-foreground">
-                    {m.sessions}
-                  </td>
-                  <td className="text-right py-2 pl-4">
-                    <span className="text-[#ffe6cb]">
-                      {formatTokens(m.input_tokens)}
-                    </span>
-                    {" / "}
-                    <span className="text-emerald-400">
-                      {formatTokens(m.output_tokens)}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {sorted.map((m) => {
+                const expanded = expandedModels.has(m.model);
+                const sourceRows = m.source_breakdown ?? [];
+                return (
+                  <Fragment key={m.model}>
+                    <tr className="border-b border-border/50 hover:bg-secondary/20 transition-colors">
+                      <td className="py-2 pr-2">
+                        <button
+                          type="button"
+                          className="rounded p-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                          title={t.analytics.expandForSources}
+                          onClick={() => setExpandedModels((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(m.model)) next.delete(m.model);
+                            else next.add(m.model);
+                            return next;
+                          })}
+                        >
+                          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </button>
+                      </td>
+                      <td className="py-2 pr-4"><span className="font-mono-ui text-xs">{m.model}</span></td>
+                      <td className="text-right py-2 px-4 text-muted-foreground">{m.sessions}</td>
+                      <td className="text-right py-2 pl-4">
+                        <span className="text-[#ffe6cb]">{formatTokens(m.input_tokens)}</span>
+                        {" / "}
+                        <span className="text-emerald-400">{formatTokens(m.output_tokens)}</span>
+                      </td>
+                    </tr>
+                    {expanded && <SourceBreakdownRows rows={sourceRows} colSpan={4} />}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+
+function CredentialPoolCard({ credentials }: { credentials: AnalyticsCredentialPoolEntry[] }) {
+  const { t } = useI18n();
+  if (credentials.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <KeyRound className="h-5 w-5 text-muted-foreground" />
+          <CardTitle className="text-base">{t.analytics.authAccounts}</CardTitle>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-3 md:grid-cols-2">
+          {credentials.map((cred) => (
+            <div key={`${cred.provider}-${cred.id || cred.ordinal}`} className="rounded border border-border/60 bg-secondary/10 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium">{cred.provider_label || cred.provider}</span>
+                    <Badge tone="secondary" className="text-[10px]">#{cred.ordinal}</Badge>
+                    <Badge tone={cred.status === "ok" ? "success" : "warning"} className="text-[10px]">{cred.status}</Badge>
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {t.analytics.account}: {cred.label || cred.id || cred.source || "—"}
+                  </div>
+                </div>
+                <Server className="mt-0.5 h-4 w-4 text-muted-foreground" />
+              </div>
+              <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                <div>{t.analytics.serving}: <span className="text-foreground/80">{cred.serving_label}</span></div>
+                {cred.base_url && <div className="font-mono-ui text-[10px] break-all">{t.analytics.endpoint}: {cred.base_url}</div>}
+                {cred.last_error_message && <div className="text-warning">{cred.last_error_code ?? ""} {cred.last_error_message}</div>}
+              </div>
+            </div>
+          ))}
         </div>
       </CardContent>
     </Card>
@@ -515,8 +656,9 @@ export default function AnalyticsPage() {
             <TokenBarChart daily={data.daily} />
           </div>
 
-          <DailyTable daily={data.daily} />
+          <DailyTable daily={data.daily} breakdown={data.daily_breakdown ?? []} />
           <ModelTable models={data.by_model} />
+          <CredentialPoolCard credentials={data.credential_pool ?? []} />
           <SkillTable skills={data.skills.top_skills} />
         </>
       )}

@@ -174,6 +174,13 @@ export const en: Translations = {
     perDayAvg: "/day avg",
     acrossModels: "across {count} models",
     inOut: "{input} in / {output} out",
+    source: "Source",
+    serving: "Serving",
+    authAccounts: "Auth Accounts",
+    account: "Account",
+    status: "Status",
+    endpoint: "Endpoint",
+    expandForSources: "Expand for model/source breakdown",
   },
 
   models: {

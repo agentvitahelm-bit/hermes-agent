@@ -176,6 +176,13 @@ export interface Translations {
     perDayAvg: string;
     acrossModels: string;
     inOut: string;
+    source: string;
+    serving: string;
+    authAccounts: string;
+    account: string;
+    status: string;
+    endpoint: string;
+    expandForSources: string;
   };
 
   // ── Models page ──

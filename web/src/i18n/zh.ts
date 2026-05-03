@@ -172,6 +172,13 @@ export const zh: Translations = {
     perDayAvg: "/天 平均",
     acrossModels: "共 {count} 个模型",
     inOut: "输入 {input} / 输出 {output}",
+    source: "来源",
+    serving: "服务",
+    authAccounts: "认证账户",
+    account: "账户",
+    status: "状态",
+    endpoint: "端点",
+    expandForSources: "展开查看模型/来源明细",
   },
 
   models: {
