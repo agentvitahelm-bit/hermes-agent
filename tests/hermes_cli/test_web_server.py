@@ -1027,6 +1027,77 @@ class TestNewEndpoints:
         assert data["totals"]["output_tokens"] == 1000
         assert data["totals"]["sessions"] == 2
 
+    def test_analytics_usage_uses_local_day_for_evening_sessions(self, monkeypatch):
+        """Late-evening Mountain sessions stay on the local day, not the next UTC day."""
+        import time as time_mod
+        from datetime import datetime, timezone
+        from hermes_state import SessionDB
+
+        old_tz = os.environ.get("TZ")
+        monkeypatch.setenv("TZ", "America/Denver")
+        if hasattr(time_mod, "tzset"):
+            time_mod.tzset()
+
+        def utc_ts(iso: str) -> float:
+            return datetime.fromisoformat(iso).replace(tzinfo=timezone.utc).timestamp()
+
+        db = SessionDB()
+        try:
+            rows = [
+                ("local-evening-20", "2025-05-05T02:30:00", 2000, 20),  # May 4 20:30 MDT
+                ("local-evening-23", "2025-05-05T05:30:00", 2300, 23),  # May 4 23:30 MDT
+                ("local-next-day", "2025-05-05T06:30:00", 500, 5),      # May 5 00:30 MDT
+            ]
+            for session_id, iso_utc, input_tokens, output_tokens in rows:
+                db.create_session(session_id=session_id, source="cli", model="test/model")
+                db.update_token_counts(
+                    session_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    model="test/model",
+                )
+                db._conn.execute(
+                    "UPDATE sessions SET started_at=? WHERE id=?",
+                    (utc_ts(iso_utc), session_id),
+                )
+            db._conn.commit()
+        finally:
+            db.close()
+
+        try:
+            resp = self.client.get("/api/analytics/usage/day?date=2025-05-04")
+            assert resp.status_code == 200
+            data = resp.json()
+            by_hour = {h["hour"]: h for h in data["hourly"]}
+            assert by_hour[20]["input_tokens"] == 2000
+            assert by_hour[20]["output_tokens"] == 20
+            assert by_hour[23]["input_tokens"] == 2300
+            assert by_hour[23]["output_tokens"] == 23
+            assert by_hour[0]["sessions"] == 0
+            assert data["totals"]["input_tokens"] == 4300
+            assert data["totals"]["output_tokens"] == 43
+            assert data["totals"]["sessions"] == 2
+
+            next_resp = self.client.get("/api/analytics/usage/day?date=2025-05-05")
+            assert next_resp.status_code == 200
+            next_data = next_resp.json()
+            next_by_hour = {h["hour"]: h for h in next_data["hourly"]}
+            assert next_by_hour[0]["input_tokens"] == 500
+            assert next_data["totals"]["sessions"] == 1
+
+            usage_resp = self.client.get("/api/analytics/usage?days=3650")
+            assert usage_resp.status_code == 200
+            daily = {d["day"]: d for d in usage_resp.json()["daily"]}
+            assert daily["2025-05-04"]["input_tokens"] == 4300
+            assert daily["2025-05-05"]["input_tokens"] == 500
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            if hasattr(time_mod, "tzset"):
+                time_mod.tzset()
+
     def test_analytics_usage_includes_model_source_breakdown(self):
         import time
         from hermes_state import SessionDB

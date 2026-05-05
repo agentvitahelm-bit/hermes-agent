@@ -2809,7 +2809,7 @@ async def get_usage_analytics(days: int = 30):
     try:
         cutoff = time.time() - (days * 86400)
         cur = db._conn.execute("""
-            SELECT date(started_at, 'unixepoch') as day,
+            SELECT date(started_at, 'unixepoch', 'localtime') as day,
                    SUM(input_tokens) as input_tokens,
                    SUM(output_tokens) as output_tokens,
                    SUM(cache_read_tokens) as cache_read_tokens,
@@ -2836,7 +2836,7 @@ async def get_usage_analytics(days: int = 30):
         by_model = [dict(r) for r in cur2.fetchall()]
 
         cur_breakdown = db._conn.execute("""
-            SELECT date(started_at, 'unixepoch') as day,
+            SELECT date(started_at, 'unixepoch', 'localtime') as day,
                    COALESCE(model, '(unknown)') as model,
                    COALESCE(source, 'unknown') as source,
                    COALESCE(billing_provider, '') as billing_provider,
@@ -2960,10 +2960,11 @@ async def get_usage_analytics(days: int = 30):
 async def get_usage_day_breakdown(date: str):
     """Hour-by-hour and per-model breakdown for a single calendar day.
 
-    ``date`` is a YYYY-MM-DD string interpreted in UTC, matching the bucketing
-    used by ``GET /api/analytics/usage`` (which groups by
-    ``date(started_at, 'unixepoch')``). This keeps the drill-down totals
-    consistent with the daily summary numbers the table is expanded from.
+    ``date`` is a YYYY-MM-DD string interpreted in the dashboard host's local
+    timezone, matching the bucketing used by ``GET /api/analytics/usage``
+    (which groups by ``date(started_at, 'unixepoch', 'localtime')``). This
+    keeps late-evening local sessions (for example 20:00-23:59 MDT) on the
+    correct calendar day instead of spilling into the next UTC date.
     """
     import re
 
@@ -2976,7 +2977,7 @@ async def get_usage_day_breakdown(date: str):
     try:
         cur = db._conn.execute(
             """
-            SELECT CAST(strftime('%H', started_at, 'unixepoch') AS INTEGER) AS hour,
+            SELECT CAST(strftime('%H', started_at, 'unixepoch', 'localtime') AS INTEGER) AS hour,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
                    COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
@@ -2986,7 +2987,7 @@ async def get_usage_day_breakdown(date: str):
                    COUNT(*) AS sessions,
                    COALESCE(SUM(api_call_count), 0) AS api_calls
             FROM sessions
-            WHERE date(started_at, 'unixepoch') = ?
+            WHERE date(started_at, 'unixepoch', 'localtime') = ?
             GROUP BY hour
             ORDER BY hour
             """,
@@ -3024,7 +3025,7 @@ async def get_usage_day_breakdown(date: str):
                    COUNT(*) AS sessions,
                    COALESCE(SUM(api_call_count), 0) AS api_calls
             FROM sessions
-            WHERE date(started_at, 'unixepoch') = ?
+            WHERE date(started_at, 'unixepoch', 'localtime') = ?
             GROUP BY model
             ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
             """,
@@ -3043,7 +3044,7 @@ async def get_usage_day_breakdown(date: str):
                    COUNT(*) AS sessions,
                    COALESCE(SUM(api_call_count), 0) AS api_calls
             FROM sessions
-            WHERE date(started_at, 'unixepoch') = ?
+            WHERE date(started_at, 'unixepoch', 'localtime') = ?
             """,
             (date,),
         )

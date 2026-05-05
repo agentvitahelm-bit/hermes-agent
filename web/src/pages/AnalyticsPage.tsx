@@ -345,7 +345,7 @@ function DayDetail({ date }: { date: string }) {
       <div>
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="text-xs font-medium text-muted-foreground">
-            Hour-by-hour (UTC) — total {formatTokens(totalTokens)} tokens across {data.totals.sessions} sessions
+            Hour-by-hour (local time) — total {formatTokens(totalTokens)} tokens across {data.totals.sessions} sessions
           </div>
           <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
             <div className="flex items-center gap-1.5">
