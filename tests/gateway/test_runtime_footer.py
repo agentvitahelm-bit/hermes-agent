@@ -7,6 +7,8 @@ import os
 
 import pytest
 
+from gateway.config import Platform
+from gateway.run import _platform_config_key
 from gateway.runtime_footer import (
     _home_relative_cwd,
     _model_short,
@@ -14,6 +16,17 @@ from gateway.runtime_footer import (
     format_runtime_footer,
     resolve_footer_config,
 )
+
+
+# ---------------------------------------------------------------------------
+# platform config key coercion used by gateway/run.py
+# ---------------------------------------------------------------------------
+
+def test_platform_config_key_accepts_enum_and_string():
+    assert _platform_config_key(Platform.TELEGRAM) == "telegram"
+    assert _platform_config_key("telegram") == "telegram"
+    assert _platform_config_key(Platform.LOCAL) == "cli"
+    assert _platform_config_key("local") == "cli"
 
 
 # ---------------------------------------------------------------------------

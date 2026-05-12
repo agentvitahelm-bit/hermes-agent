@@ -803,8 +803,15 @@ def _check_unavailable_skill(command_name: str) -> str | None:
 
 
 def _platform_config_key(platform: "Platform") -> str:
-    """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value)."""
-    return "cli" if platform == Platform.LOCAL else platform.value
+    """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value).
+
+    Most gateway paths pass a Platform enum, but defensive callers and some
+    serialized gateway/session boundaries may hand us the raw platform string.
+    Runtime footer rendering must not disappear just because that boundary
+    supplied ``"telegram"`` instead of ``Platform.TELEGRAM``.
+    """
+    value = getattr(platform, "value", platform)
+    return "cli" if value == Platform.LOCAL.value else str(value)
 
 
 def _load_gateway_config() -> dict:
@@ -6377,7 +6384,7 @@ class GatewayRunner:
                     len(_footer_line or ""),
                 )
             except Exception as _footer_err:
-                logger.debug("runtime_footer build failed: %s", _footer_err)
+                logger.warning("runtime_footer build failed: %s", _footer_err, exc_info=True)
                 _footer_line = ""
             if _footer_line and response and not agent_result.get("already_sent"):
                 response = f"{response}\n\n{_footer_line}"
@@ -6605,7 +6612,12 @@ class GatewayRunner:
                             _foot_result = await _foot_adapter.send(
                                 source.chat_id,
                                 _footer_line,
-                                reply_to=event.message_id,
+                                # Send the runtime footer as a visible standalone
+                                # trailing status message. Reply-targeting the
+                                # original user message can make the footer look
+                                # like a tucked-away reply in Telegram clients,
+                                # which defeated the "follow-up message" UX.
+                                reply_to=None,
                                 metadata=_foot_meta,
                             )
                             if getattr(_foot_result, "success", False):
