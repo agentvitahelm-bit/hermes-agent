@@ -6289,15 +6289,92 @@ class GatewayRunner:
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+                from gateway.runtime_footer import format_runtime_footer as _frf
+                from gateway.runtime_footer import resolve_footer_config as _rfc
+
+                _footer_config = _load_gateway_config()
+                _footer_platform_key = _platform_config_key(source.platform)
+                _footer_effective = _rfc(_footer_config, _footer_platform_key)
+                _footer_model = agent_result.get("model") or _resolve_gateway_model(_footer_config)
+                _footer_context_tokens = agent_result.get("last_prompt_tokens", 0) or 0
+                _footer_context_length = agent_result.get("context_length") or None
+                _footer_session_started_at = getattr(session_entry, "created_at", None) or _msg_start_time
+
+                # Some provider/streaming paths can return no token metadata even
+                # though the gateway has enough state to produce a useful status
+                # line.  Fall back at the gateway boundary so Telegram never
+                # degrades to a bare "gpt-*" footer.
+                if not _footer_context_length:
+                    try:
+                        from agent.model_metadata import get_model_context_length
+                        _model_cfg = (_footer_config.get("model") or {}) if isinstance(_footer_config, dict) else {}
+                        _cfg_ctx = None
+                        if isinstance(_model_cfg, dict) and _model_cfg.get("context_length") is not None:
+                            _cfg_ctx = int(_model_cfg.get("context_length"))
+                        _footer_context_length = get_model_context_length(
+                            _footer_model or "",
+                            base_url=getattr(self, "_base_url", "") or "",
+                            api_key="",
+                            config_context_length=_cfg_ctx,
+                        )
+                    except Exception:
+                        _footer_context_length = None
+                if not _footer_context_tokens:
+                    try:
+                        from agent.model_metadata import estimate_messages_tokens_rough
+                        _footer_context_tokens = estimate_messages_tokens_rough(
+                            (history or []) + [{"role": "user", "content": message_text}]
+                        )
+                    except Exception:
+                        try:
+                            _footer_context_tokens = max(0, len(str(message_text or "")) // 4)
+                        except Exception:
+                            _footer_context_tokens = 0
+
                 _footer_line = _bfl(
-                    user_config=_load_gateway_config(),
-                    platform_key=_platform_config_key(source.platform),
-                    model=agent_result.get("model"),
-                    context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
-                    context_length=agent_result.get("context_length") or None,
+                    user_config=_footer_config,
+                    platform_key=_footer_platform_key,
+                    model=_footer_model,
+                    context_tokens=_footer_context_tokens,
+                    context_length=_footer_context_length,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
                     response_seconds=_response_time,
-                    session_started_at=getattr(session_entry, "created_at", None),
+                    session_started_at=_footer_session_started_at,
+                )
+
+                # A status-style footer with only the model name is misleading:
+                # it looks enabled but hides the actual status fields Ethan wants.
+                # If config/cache/runtime oddities produce that partial line,
+                # force the status fields from the metadata above.
+                if (
+                    _footer_line
+                    and _footer_effective.get("style") in {"telegram_status", "status"}
+                    and "│" not in _footer_line
+                    and (_footer_context_length or _response_time is not None)
+                ):
+                    _footer_line = _frf(
+                        model=_footer_model,
+                        context_tokens=_footer_context_tokens,
+                        context_length=_footer_context_length,
+                        cwd=os.environ.get("TERMINAL_CWD", ""),
+                        fields=(
+                            "model", "context_tokens", "context_bar",
+                            "session_elapsed", "response_elapsed",
+                        ),
+                        response_seconds=_response_time,
+                        session_started_at=_footer_session_started_at,
+                        style="telegram_status",
+                    )
+                logger.info(
+                    "runtime_footer built: platform=%s fields=%s style=%s has_sep=%s context_tokens=%s context_length=%s response_seconds=%.1f line_chars=%d",
+                    _footer_platform_key,
+                    _footer_effective.get("fields"),
+                    _footer_effective.get("style"),
+                    "│" in _footer_line,
+                    _footer_context_tokens,
+                    _footer_context_length,
+                    _response_time,
+                    len(_footer_line or ""),
                 )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
