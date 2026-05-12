@@ -93,9 +93,33 @@ def _format_token_count(tokens: Optional[int]) -> str:
     return str(n)
 
 
-def _context_pct(context_tokens: int, context_length: Optional[int]) -> Optional[int]:
-    if context_length and context_length > 0 and context_tokens >= 0:
-        return max(0, min(100, round((context_tokens / context_length) * 100)))
+def _coerce_nonnegative_int(value: Any) -> Optional[int]:
+    """Best-effort integer coercion for runtime metadata values.
+
+    Token counts normally arrive as ints from the agent, but gateway/session
+    boundaries can hand us numeric strings.  Invalid or negative values return
+    ``None`` so the affected field is skipped instead of breaking the footer.
+    """
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
+
+
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _context_pct(context_tokens: Any, context_length: Any) -> Optional[int]:
+    context_tokens_i = _coerce_nonnegative_int(context_tokens)
+    context_length_i = _coerce_positive_int(context_length)
+    if context_tokens_i is not None and context_length_i:
+        return max(0, min(100, round((context_tokens_i / context_length_i) * 100)))
     return None
 
 
@@ -222,8 +246,10 @@ def format_runtime_footer(
             if pct is not None:
                 parts.append(f"{pct}%")
         elif field == "context_tokens":
-            if context_length and context_length > 0 and context_tokens >= 0:
-                parts.append(f"{_format_token_count(context_tokens)}/{_format_token_count(context_length)}")
+            context_length_i = _coerce_positive_int(context_length)
+            context_tokens_i = _coerce_nonnegative_int(context_tokens)
+            if context_tokens_i is not None and context_length_i:
+                parts.append(f"{_format_token_count(context_tokens_i)}/{_format_token_count(context_length_i)}")
         elif field == "context_bar":
             bar = _context_bar(pct)
             if bar:

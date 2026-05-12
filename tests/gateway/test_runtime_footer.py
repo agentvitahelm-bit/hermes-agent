@@ -151,6 +151,18 @@ def test_format_telegram_status_footer():
     assert out == "gpt-5.5 │ 44.3K/272.0K │ [█░░░░░░░░░] 16% │ 1h 9m │ ⏲ 5m"
 
 
+def test_format_telegram_status_footer_coerces_numeric_strings():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens="44300",
+        context_length="272000",
+        fields=("model", "context_tokens", "context_bar", "response_elapsed"),
+        response_seconds=300,
+        style="telegram_status",
+    )
+    assert out == "gpt-5.5 │ 44.3K/272.0K │ [█░░░░░░░░░] 16% │ ⏲ 5m"
+
+
 def test_resolve_accepts_legacy_string_fields():
     user = {"display": {"runtime_footer": {"enabled": True, "fields": "[model, context_bar]"}}}
     cfg = resolve_footer_config(user, "telegram")
