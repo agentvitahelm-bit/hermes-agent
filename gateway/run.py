@@ -6522,9 +6522,31 @@ class GatewayRunner:
                     try:
                         _foot_adapter = self.adapters.get(source.platform)
                         if _foot_adapter:
-                            await _foot_adapter.send(source.chat_id, _footer_line)
+                            _foot_meta = getattr(event, "metadata", None)
+                            if _foot_meta is None and getattr(source, "thread_id", None):
+                                _foot_meta = {"thread_id": source.thread_id}
+                            _foot_result = await _foot_adapter.send(
+                                source.chat_id,
+                                _footer_line,
+                                reply_to=event.message_id,
+                                metadata=_foot_meta,
+                            )
+                            if getattr(_foot_result, "success", False):
+                                logger.info(
+                                    "runtime_footer trailing send succeeded: platform=%s chat=%s chars=%d",
+                                    _platform_name,
+                                    source.chat_id or "unknown",
+                                    len(_footer_line),
+                                )
+                            else:
+                                logger.warning(
+                                    "runtime_footer trailing send failed: platform=%s chat=%s error=%s",
+                                    _platform_name,
+                                    source.chat_id or "unknown",
+                                    getattr(_foot_result, "error", None),
+                                )
                     except Exception as _e:
-                        logger.debug("trailing footer send failed: %s", _e)
+                        logger.warning("runtime_footer trailing send failed: %s", _e)
                 return None
 
             return response
