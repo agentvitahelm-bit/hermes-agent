@@ -7,6 +7,8 @@ import os
 
 import pytest
 
+from gateway.config import Platform
+from gateway.run import _platform_config_key
 from gateway.runtime_footer import (
     _home_relative_cwd,
     _model_short,
@@ -14,6 +16,17 @@ from gateway.runtime_footer import (
     format_runtime_footer,
     resolve_footer_config,
 )
+
+
+# ---------------------------------------------------------------------------
+# platform config key coercion used by gateway/run.py
+# ---------------------------------------------------------------------------
+
+def test_platform_config_key_accepts_enum_and_string():
+    assert _platform_config_key(Platform.TELEGRAM) == "telegram"
+    assert _platform_config_key("telegram") == "telegram"
+    assert _platform_config_key(Platform.LOCAL) == "cli"
+    assert _platform_config_key("local") == "cli"
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +150,52 @@ def test_format_footer_custom_field_order():
     assert out == "50% · gpt-5.4"
 
 
+def test_format_telegram_status_footer():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=44_300,
+        context_length=272_000,
+        fields=("model", "context_tokens", "context_bar", "session_elapsed", "response_elapsed"),
+        response_seconds=300,
+        session_started_at=1_000,
+        now=5_140,
+        style="telegram_status",
+    )
+    assert out == "gpt-5.5 │ 44.3K/272.0K │ [█░░░░░░░░░] 16% │ 1h 9m │ ⏲ 5m"
+
+
+def test_format_telegram_status_footer_coerces_numeric_strings():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens="44300",
+        context_length="272000",
+        fields=("model", "context_tokens", "context_bar", "response_elapsed"),
+        response_seconds=300,
+        style="telegram_status",
+    )
+    assert out == "gpt-5.5 │ 44.3K/272.0K │ [█░░░░░░░░░] 16% │ ⏲ 5m"
+
+
+def test_format_telegram_status_footer_keeps_timing_when_context_missing():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=0,
+        context_length=None,
+        fields=("model", "context_tokens", "context_bar", "session_elapsed", "response_elapsed"),
+        response_seconds=300,
+        session_started_at=1_000,
+        now=5_140,
+        style="telegram_status",
+    )
+    assert out == "gpt-5.5 │ 1h 9m │ ⏲ 5m"
+
+
+def test_resolve_accepts_legacy_string_fields():
+    user = {"display": {"runtime_footer": {"enabled": True, "fields": "[model, context_bar]"}}}
+    cfg = resolve_footer_config(user, "telegram")
+    assert cfg["fields"] == ["model", "context_bar"]
+
+
 def test_format_footer_unknown_field_silently_ignored():
     out = format_runtime_footer(
         model="openai/gpt-5.4",
@@ -153,7 +212,11 @@ def test_format_footer_unknown_field_silently_ignored():
 
 def test_resolve_defaults_off_empty_config():
     cfg = resolve_footer_config({}, "telegram")
-    assert cfg == {"enabled": False, "fields": ["model", "context_pct", "cwd"]}
+    assert cfg == {
+        "enabled": False,
+        "fields": ["model", "context_pct", "cwd"],
+        "style": "default",
+    }
 
 
 def test_resolve_global_enable():

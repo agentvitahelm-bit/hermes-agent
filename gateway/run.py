@@ -1777,8 +1777,9 @@ def _check_unavailable_skill(command_name: str) -> str | None:
 
 
 def _platform_config_key(platform: "Platform") -> str:
-    """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value)."""
-    return "cli" if platform == Platform.LOCAL else platform.value
+    """Map a Platform enum/string to its config.yaml key (LOCAL→"cli", rest→value)."""
+    value = getattr(platform, "value", platform)
+    return "cli" if value == Platform.LOCAL.value else str(value)
 
 
 def _teams_pipeline_plugin_enabled() -> bool:
@@ -9018,15 +9019,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # text, so we fire a separate trailing send below.
             _footer_line = ""
             try:
-                from gateway.runtime_footer import build_footer_line as _bfl
+                from gateway.runtime_footer import build_footer_line as _bfl, resolve_footer_config
+                _footer_cfg = _load_gateway_config()
+                _footer_platform = _platform_config_key(source.platform)
                 _footer_line = _bfl(
-                    user_config=_load_gateway_config(),
-                    platform_key=_platform_config_key(source.platform),
+                    user_config=_footer_cfg,
+                    platform_key=_footer_platform,
                     model=agent_result.get("model"),
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
+                    response_seconds=_response_time,
+                    session_started_at=getattr(session_entry, "created_at", None) or getattr(session_entry, "last_updated", None),
                 )
+                if _footer_line:
+                    _resolved_footer = resolve_footer_config(_footer_cfg, _footer_platform)
+                    logger.info(
+                        "runtime_footer built: platform=%s fields=%s style=%s context_tokens=%s context_length=%s response_seconds=%.1f line_chars=%d",
+                        _footer_platform,
+                        _resolved_footer.get("fields"),
+                        _resolved_footer.get("style"),
+                        agent_result.get("last_prompt_tokens", 0) or 0,
+                        agent_result.get("context_length") or None,
+                        _response_time,
+                        len(_footer_line),
+                    )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
                 _footer_line = ""
@@ -9310,6 +9327,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 source.chat_id,
                                 _footer_line,
                                 metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+                            )
+                            logger.info(
+                                "runtime_footer trailing send succeeded: platform=%s chat=%s chars=%d",
+                                _platform_name,
+                                source.chat_id or "unknown",
+                                len(_footer_line),
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
