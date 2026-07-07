@@ -40,6 +40,7 @@ const PERIODS = [
   { label: "7d", days: 7 },
   { label: "30d", days: 30 },
   { label: "90d", days: 90 },
+  { label: "365d", days: 365 },
 ] as const;
 
 // Must match _AUX_TASK_SLOTS in hermes_cli/web_server.py.
