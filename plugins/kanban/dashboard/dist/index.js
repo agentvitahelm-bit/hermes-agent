@@ -201,34 +201,37 @@
   const DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban";
   const DOCS_TUTORIAL_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-tutorial";
 
-  // localStorage key for the user's selected board. Independent of the
-  // CLI's on-disk ``<root>/kanban/current`` pointer so browser users
-  // can inspect any board without shifting the CLI's active board out
-  // from under a terminal they left open.
+  // Board selection is tab-scoped: sessionStorage survives refreshes but is
+  // not shared between sibling tabs. localStorage used to own this value,
+  // which made changing one Kanban tab redirect every other tab on refresh.
+  // Keep the old key only as an upgrade seed for tabs that have not yet
+  // established their own session value.
+  const SS_BOARD_KEY = "hermes.kanban.selectedBoard";
   const LS_BOARD_KEY = "hermes.kanban.selectedBoard";
 
   function readSelectedBoard() {
     try {
+      const v = window.sessionStorage.getItem(SS_BOARD_KEY);
+      const selected = (v || "").trim();
+      if (selected) return selected;
+    } catch (_e) { /* fall through to the legacy seed */ }
+
+    try {
       const v = window.localStorage.getItem(LS_BOARD_KEY);
-      return (v || "").trim() || null;
+      const legacy = (v || "").trim();
+      if (!legacy) return null;
+      try { window.sessionStorage.setItem(SS_BOARD_KEY, legacy); } catch (_e) { /* noop */ }
+      return legacy;
     } catch (_e) { return null; }
   }
 
   function writeSelectedBoard(slug) {
     try {
-      // Persist the user's dashboard-side board pin even for "default".
-      // Previously this stripped "default" to keep localStorage empty,
-      // but the fetch layer read that absence as "no opinion" and fell
-      // through to the server-side ``current`` file — which the board
-      // switcher also writes. Result: selecting the default tab after
-      // creating a new board with "switch" checked showed the new
-      // board's (wrong) data because the URL omitted ``?board=`` and
-      // the backend happily returned whichever board was "current".
-      // Persisting every selection keeps the dashboard's board opinion
-      // independent of the CLI's active board, which was the original
-      // design intent. Regression: #20879.
-      if (slug) window.localStorage.setItem(LS_BOARD_KEY, slug);
-      else window.localStorage.removeItem(LS_BOARD_KEY);
+      // Persist every selection, including "default", in this tab only. The
+      // explicit board query parameter then continues to override the CLI's
+      // server-side ``current`` pointer without affecting sibling tabs.
+      if (slug) window.sessionStorage.setItem(SS_BOARD_KEY, slug);
+      else window.sessionStorage.removeItem(SS_BOARD_KEY);
     } catch (_e) { /* ignore quota / private mode */ }
   }
 

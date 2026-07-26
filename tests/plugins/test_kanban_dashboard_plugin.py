@@ -389,9 +389,9 @@ def test_dashboard_client_side_filtering_includes_tenant_filter():
 def test_dashboard_initial_board_uses_backend_current_when_unpinned():
     """Fresh browsers should open the backend current board, not default.
 
-    Explicit dashboard selections are stored in localStorage and should still
-    win, but an empty localStorage state must adopt the API's ``current`` board
-    so multi-board installs do not look empty on first load.
+    Explicit dashboard selections are stored in per-tab sessionStorage and
+    should still win, but an empty tab state must adopt the API's ``current``
+    board so multi-board installs do not look empty on first load.
     """
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -403,6 +403,31 @@ def test_dashboard_initial_board_uses_backend_current_when_unpinned():
     assert "if (!storedBoard && !board && data && data.current)" in js
     assert "setBoard(data.current);" in js
     assert 'readSelectedBoard() || "default"' not in js
+
+
+def test_dashboard_selected_board_is_persisted_per_browser_tab():
+    """Board changes in one dashboard tab must not redirect sibling tabs.
+
+    localStorage is shared across same-origin tabs. sessionStorage is scoped to
+    one tab while still surviving reloads, which is the required contract for
+    keeping several Kanban boards open side by side.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    js = bundle.read_text()
+
+    assert 'const SS_BOARD_KEY = "hermes.kanban.selectedBoard";' in js
+    assert "window.sessionStorage.getItem(SS_BOARD_KEY)" in js
+    assert "window.sessionStorage.setItem(SS_BOARD_KEY, slug)" in js
+    assert "window.sessionStorage.removeItem(SS_BOARD_KEY)" in js
+    assert "window.localStorage.setItem(LS_BOARD_KEY, slug)" not in js
+    assert "window.localStorage.removeItem(LS_BOARD_KEY)" not in js
+
+    # Preserve an existing localStorage selection only as a one-time seed for
+    # tabs that first load after upgrading from the old shared-state behavior.
+    assert "window.localStorage.getItem(LS_BOARD_KEY)" in js
+    assert "window.sessionStorage.setItem(SS_BOARD_KEY, legacy)" in js
 
 
 def test_dashboard_markdown_html_is_sanitized_before_render():
