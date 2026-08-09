@@ -1408,10 +1408,12 @@ display:
   long_running_notifications: true
 
   # Include detailed iteration/tool/status context in busy acknowledgments
-  # and long-running heartbeats. When true, busy acks show "iteration 21/60,
-  # terminal, 10 min" and the heartbeat shows "⏳ Working — 12 min,
-  # iteration 21/60, terminal". When false (Telegram default), both stay
-  # terse: "Interrupting current task" and "⏳ Working — 12 min, terminal".
+  # and long-running heartbeats. Heartbeats always include the current turn's
+  # tool-call count. When true, busy acks show "iteration 21/60, terminal,
+  # 10 min" and the heartbeat shows "⏳ Working — 12 min — iteration 21/60,
+  # 8 tool calls, terminal". When false (Telegram default), both stay terse:
+  # "Interrupting current task" and "⏳ Working — 12 min — 8 tool calls,
+  # terminal".
   busy_ack_detail: true
 
   # What Enter does when Hermes is already busy (CLI and gateway platforms).

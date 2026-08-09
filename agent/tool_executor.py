@@ -696,6 +696,7 @@ def _begin_tool_execution(
                 f"{args_preview}"
             )
 
+    agent._tool_call_count = getattr(agent, "_tool_call_count", 0) + 1
     agent._current_tool = function_name
     agent._touch_activity(f"executing tool: {function_name}")
     try:

@@ -4106,6 +4106,7 @@ class AIAgent:
             extra={
             "current_tool": self._current_tool,
             "api_call_count": self._api_call_count,
+            "tool_call_count": getattr(self, "_tool_call_count", 0),
             "max_iterations": self.max_iterations,
             "budget_used": self.iteration_budget.used,
             "budget_max": self.iteration_budget.max_total,

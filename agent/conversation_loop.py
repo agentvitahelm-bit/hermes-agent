@@ -1493,6 +1493,9 @@ def run_conversation(
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
+    # Heartbeats report tool executions for this turn, not the lifetime of a
+    # cached session agent.
+    agent._tool_call_count = 0
     final_response = None
     interrupted = False
     failed = False

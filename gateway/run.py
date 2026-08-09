@@ -138,6 +138,39 @@ _HYGIENE_COOLDOWN_LADDER_MULTIPLIERS = (1, 3, 9)
 _HYGIENE_COOLDOWN_MAX_SECONDS = 3600.0
 
 
+def _format_long_running_heartbeat(
+    elapsed_mins: int,
+    activity: dict[str, Any] | None,
+    *,
+    include_iteration: bool,
+) -> str:
+    """Build the user-visible long-running status from live agent counters."""
+    parts: list[str] = []
+    activity = activity or {}
+
+    if include_iteration:
+        api_calls = activity.get("api_call_count")
+        max_iterations = activity.get("max_iterations")
+        if api_calls is not None and max_iterations:
+            parts.append(f"iteration {api_calls}/{max_iterations}")
+
+    tool_calls = activity.get("tool_call_count")
+    try:
+        tool_calls = int(tool_calls) if tool_calls is not None else None
+    except (TypeError, ValueError):
+        tool_calls = None
+    if tool_calls is not None and tool_calls >= 0:
+        noun = "tool call" if tool_calls == 1 else "tool calls"
+        parts.append(f"{tool_calls} {noun}")
+
+    action = activity.get("current_tool") or activity.get("last_activity_desc")
+    if action:
+        parts.append(str(action))
+
+    detail = " — " + ", ".join(parts) if parts else ""
+    return f"⏳ Working — {elapsed_mins} min{detail}"
+
+
 def _hygiene_cooldown_for_failure(
     gateway,
     session_key: str,
@@ -25729,11 +25762,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     break
                 _elapsed_mins = int((time.time() - _notify_start) // 60)
                 # Include agent activity context if available. Default
-                # heartbeat is terse: elapsed + current tool. Verbose
-                # iteration counter is gated on busy_ack_detail so users
-                # who want it can opt in per platform.
+                # Heartbeats always include the turn's tool-call count plus
+                # the current action. The verbose API iteration counter stays
+                # gated on busy_ack_detail so users can opt in per platform.
                 _agent_ref = agent_holder[0]
-                _status_detail = ""
+                _activity_summary = None
                 _want_iteration_detail = bool(
                     resolve_display_setting(
                         user_config,
@@ -25744,23 +25777,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
                     try:
-                        _a = _agent_ref.get_activity_summary()
-                        _parts = []
-                        if _want_iteration_detail:
-                            _parts.append(
-                                f"iteration {_a['api_call_count']}/{_a['max_iterations']}"
-                            )
-                        _action = _a.get("current_tool") or _a.get("last_activity_desc")
-                        if _action:
-                            _parts.append(str(_action))
-                        if _parts:
-                            _status_detail = " — " + ", ".join(_parts)
+                        _activity_summary = _agent_ref.get_activity_summary()
                     except Exception:
                         pass
                 _heartbeat_text = (
                     _generic_status_phrase("status")
                     if _long_running_mode == "generic"
-                    else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                    else _format_long_running_heartbeat(
+                        _elapsed_mins,
+                        _activity_summary,
+                        include_iteration=_want_iteration_detail,
+                    )
                 )
                 try:
                     _notify_res = None

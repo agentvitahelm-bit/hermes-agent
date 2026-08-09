@@ -17,6 +17,7 @@ def _agent_with_db(session_id: str = "sess-1"):
         _session_activity_last_persist_mono=0.0,
         _current_tool=None,
         _api_call_count=0,
+        _tool_call_count=0,
         max_iterations=10,
         iteration_budget=SimpleNamespace(used=0, max_total=10),
     )
@@ -188,6 +189,7 @@ def test_get_activity_summary_exposes_shared_activity_contract(monkeypatch):
     assert summary["seconds_since_activity"] == 10.0
     assert summary["last_activity_ts"] == 1_700_000_000.0
     assert summary["last_activity_desc"] == "executing tool: terminal"
+    assert summary["tool_call_count"] == 0
     assert "phase" not in summary
     assert "last_progress_at" not in summary
 
