@@ -636,10 +636,10 @@ class Task:
     session_id: Optional[str] = None         # originating HERMES_SESSION_ID; NULL from CLI/dashboard
     # VALID_BLOCK_KINDS or None (legacy); identity fields disambiguate same-kind blockers.
     block_kind: Optional[str] = None
-    blocker_fingerprint: Optional[str] = None
-    precondition_digest: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    blocker_fingerprint: Optional[str] = None
+    precondition_digest: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Task:

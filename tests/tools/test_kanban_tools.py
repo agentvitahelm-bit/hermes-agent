@@ -592,9 +592,15 @@ def test_block_dependency_without_open_parent_is_rekinded(worker_env):
 def test_block_tool_threads_structured_blocker_identity(worker_env):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
-    from tools import kanban_tools as kt
+    from tools import kanban_tools as _kanban_tools  # registers the tool
+    from tools.registry import registry
 
-    result = json.loads(kt._handle_block({
+    entry = registry.get_entry("kanban_block")
+    assert entry is not None
+    properties = entry.schema["parameters"]["properties"]
+    assert {"blocker_fingerprint", "precondition_digest"} <= properties.keys()
+
+    result = json.loads(entry.handler({
         "reason": "An owner must approve this operation",
         "kind": "needs_input",
         "blocker_fingerprint": "approval:operations-owner",

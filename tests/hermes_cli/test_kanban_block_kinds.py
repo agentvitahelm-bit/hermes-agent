@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -214,11 +215,16 @@ def test_cli_block_threads_structured_identity(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
 
-    args = argparse.Namespace(
-        task_id=tid, ids=None, reason=["Waiting", "for", "approval"], kind="needs_input",
-        blocker_fingerprint="approval:owner", precondition_digest="revision:7",
-    )
-    assert kanban_cli._cmd_block(args) == 0
+    parser = argparse.ArgumentParser(prog="hermes")
+    subparsers = parser.add_subparsers(dest="command")
+    kanban_cli.build_parser(subparsers)
+    args = parser.parse_args([
+        "kanban", "block", tid, "Waiting", "for", "approval",
+        "--kind", "needs_input",
+        "--blocker-fingerprint", "approval:owner",
+        "--precondition-digest", "revision:7",
+    ])
+    assert kanban_cli.kanban_command(args) == 0
 
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, tid)
@@ -368,5 +374,34 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
+
+
+def test_task_legacy_positional_constructor_keeps_established_field_bindings() -> None:
+    """Appending task fields must not shift legacy positional callers."""
+    legacy_prefix_fields = (
+        "id", "title", "body", "assignee", "status", "priority", "created_by",
+        "created_at", "started_at", "completed_at", "workspace_kind", "workspace_path",
+        "claim_lock", "claim_expires", "tenant", "branch_name", "project_id", "result",
+        "idempotency_key", "consecutive_failures", "worker_pid", "last_failure_error",
+        "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
+        "current_step_key", "skills", "model_override", "provider_override",
+        "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns", "session_id",
+        "block_kind",
+    )
+    baseline = kb.Task(
+        id="t_legacy", title="legacy", body=None, assignee=None, status="blocked",
+        priority=0, created_by=None, created_at=None, started_at=None, completed_at=None,
+        workspace_kind="scratch", workspace_path=None, claim_lock=None, claim_expires=None,
+        tenant=None,
+    )
+
+    legacy_args = tuple(getattr(baseline, field) for field in legacy_prefix_fields)
+    task_factory: Any = kb.Task
+    task = task_factory(*(legacy_args + (2, "contract-v1")))
+
+    assert task.block_recurrences == 2
+    assert task.completion_contract == "contract-v1"
+    assert task.blocker_fingerprint is None
+    assert task.precondition_digest is None
 
 
