@@ -589,6 +589,28 @@ def test_block_dependency_without_open_parent_is_rekinded(worker_env):
     assert "no parent is open" in d["note"]
 
 
+def test_block_tool_threads_structured_blocker_identity(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    result = json.loads(kt._handle_block({
+        "reason": "An owner must approve this operation",
+        "kind": "needs_input",
+        "blocker_fingerprint": "approval:operations-owner",
+        "precondition_digest": "candidate:42",
+    }))
+
+    assert result["ok"] is True
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, worker_env)
+        assert task is not None
+        assert task.blocker_fingerprint is not None
+        assert task.precondition_digest is not None
+        assert task.blocker_fingerprint.startswith("sha256:")
+        assert task.precondition_digest.startswith("sha256:")
+
+
 def test_heartbeat_extends_claim_expires(worker_env):
     """The kanban_heartbeat tool MUST extend claim_expires, not just
     update last_heartbeat_at — otherwise long-running workers loop the

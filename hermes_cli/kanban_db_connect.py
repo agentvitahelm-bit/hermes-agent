@@ -883,6 +883,8 @@ _LATER_TASK_COLUMNS = (
     ("session_id", "session_id TEXT"),
     # Typed block reason (VALID_BLOCK_KINDS); NULL = generic human blocker.
     ("block_kind", "block_kind TEXT"),
+    ("blocker_fingerprint", "blocker_fingerprint TEXT"),
+    ("block_precondition_digest", "block_precondition_digest TEXT"),
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),

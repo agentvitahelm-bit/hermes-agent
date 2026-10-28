@@ -982,6 +982,8 @@ def _commented(conn, reason: Optional[str], author, prefix: str, op):
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
+    blocker_fingerprint = getattr(args, "blocker_fingerprint", None)
+    precondition_digest = getattr(args, "precondition_digest", None)
     author = _profile_author()
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
@@ -1002,7 +1004,10 @@ def _cmd_block(args: argparse.Namespace) -> int:
             return f"Blocked {tid}{suffix}"
 
         op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
-            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
+            conn, tid, reason=reason, kind=kind,
+            blocker_fingerprint=blocker_fingerprint,
+            precondition_digest=precondition_digest,
+            expected_run_id=_worker_run_id_for(tid)))
         return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
 
 

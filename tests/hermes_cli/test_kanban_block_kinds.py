@@ -10,7 +10,7 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
   unless no parent is open, in which case the wait can never be satisfied
   and the block is recorded as ``needs_input`` (sticky, loop-counted).
 * ``needs_input`` / ``capability`` / un-typed blocks land in ``blocked``;
-  each same-cause re-block after an unblock increments ``block_recurrences``,
+  each same-identity re-block after an unblock increments ``block_recurrences``,
   and at ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
 * ``unblock_task`` deliberately does NOT reset ``block_recurrences`` (the
   amnesia that let the loop run unbounded).
@@ -20,6 +20,7 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,171 @@ def _make_running_again(conn, tid):
 # ---------------------------------------------------------------------------
 # Loop breaker
 # ---------------------------------------------------------------------------
+
+
+def test_same_kind_different_derived_cause_resets_recurrence(kanban_home: Path) -> None:
+    """Broad block kinds do not make unrelated blockers look recurrent."""
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="Need the finance owner to approve", kind="needs_input")
+        first = kb.get_task(conn, tid)
+        assert first is not None
+        assert first.block_recurrences == 1
+        first_fingerprint = first.blocker_fingerprint
+
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="Need the UX owner to choose a layout", kind="needs_input")
+
+        second = kb.get_task(conn, tid)
+        assert second is not None
+        assert second.status == "blocked"
+        assert second.block_recurrences == 1
+        assert second.blocker_fingerprint != first_fingerprint
+        payload = [e.payload for e in kb.list_events(conn, tid) if e.kind == "blocked"][-1]
+        assert payload is not None
+        assert payload["previous_blocker_fingerprint"] == first_fingerprint
+        assert payload["blocker_fingerprint"] == second.blocker_fingerprint
+        assert payload["previous_precondition_digest"] is None
+        assert payload["precondition_digest"] is None
+        assert payload["effective_limit"] == kb.BLOCK_RECURRENCE_LIMIT
+
+
+def test_explicit_fingerprint_recurs_across_display_prose(kanban_home: Path) -> None:
+    """Callers can keep stable blocker identity while improving human prose."""
+    identity = "approval:security-owner"
+    precondition = "repository-policy-v1"
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(
+            conn, tid, reason="Security owner approval is required", kind="needs_input",
+            blocker_fingerprint=identity, precondition_digest=precondition,
+        )
+        first = kb.get_task(conn, tid)
+        assert first is not None
+        assert first.blocker_fingerprint is not None
+        assert first.precondition_digest is not None
+        assert first.blocker_fingerprint.startswith("sha256:")
+        assert first.precondition_digest.startswith("sha256:")
+        assert identity not in first.blocker_fingerprint
+        assert precondition not in first.precondition_digest
+
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(
+            conn, tid, reason="Still waiting for the designated security approver", kind="needs_input",
+            blocker_fingerprint=identity, precondition_digest=precondition,
+        )
+
+        second = kb.get_task(conn, tid)
+        assert second is not None
+        assert second.status == "triage"
+        assert second.block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
+        payload = [e.payload for e in kb.list_events(conn, tid) if e.kind == "block_loop_detected"][-1]
+        assert payload is not None
+        assert payload["previous_blocker_fingerprint"] == payload["blocker_fingerprint"]
+        assert payload["previous_precondition_digest"] == payload["precondition_digest"]
+        assert payload["effective_limit"] == kb.BLOCK_RECURRENCE_LIMIT
+        assert identity not in json.dumps(payload)
+        assert precondition not in json.dumps(payload)
+
+
+def test_changed_precondition_resets_same_explicit_blocker(kanban_home: Path) -> None:
+    """The same blocker is fresh work when its relevant preconditions changed."""
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(
+            conn, tid, reason="Run policy review", kind="needs_input",
+            blocker_fingerprint="policy-review", precondition_digest="commit-a",
+        )
+        first = kb.get_task(conn, tid)
+        assert first is not None
+
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(
+            conn, tid, reason="Run policy review again", kind="needs_input",
+            blocker_fingerprint="policy-review", precondition_digest="commit-b",
+        )
+
+        second = kb.get_task(conn, tid)
+        assert second is not None
+        assert second.status == "blocked"
+        assert second.block_recurrences == 1
+        assert second.blocker_fingerprint == first.blocker_fingerprint
+        assert second.precondition_digest != first.precondition_digest
+
+
+def test_derived_identity_normalizes_reason_text(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="  Need   OWNER Approval  ", kind="needs_input")
+        first = kb.get_task(conn, tid)
+        assert first is not None
+
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="need owner approval", kind="needs_input")
+
+        second = kb.get_task(conn, tid)
+        assert second is not None
+        assert second.blocker_fingerprint == first.blocker_fingerprint
+        assert second.status == "triage"
+
+
+def test_successful_completion_clears_block_identity(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(
+            conn, tid, reason="Needs approval", kind="needs_input",
+            blocker_fingerprint="approval", precondition_digest="revision-1",
+        )
+        assert kb.complete_task(conn, tid, result="resolved")
+        completed = kb.get_task(conn, tid)
+        assert completed is not None
+        assert completed.status == "done"
+        assert completed.block_kind is None
+        assert completed.blocker_fingerprint is None
+        assert completed.precondition_digest is None
+        assert completed.block_recurrences == 0
+
+
+def test_block_identity_columns_migrate_and_read_back(kanban_home: Path) -> None:
+    """Legacy boards gain nullable identity columns without losing task reads."""
+    with kbc.connect_closing() as conn:
+        for column in ("blocker_fingerprint", "block_precondition_digest"):
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+            if column in columns:
+                conn.execute(f"ALTER TABLE tasks DROP COLUMN {column}")
+
+        kbc._migrate_add_optional_columns(conn)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+        assert {"blocker_fingerprint", "block_precondition_digest"} <= columns
+
+        tid = kb.create_task(conn, title="legacy board task")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.blocker_fingerprint is None
+        assert task.precondition_digest is None
+
+
+def test_cli_block_threads_structured_identity(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+
+    args = argparse.Namespace(
+        task_id=tid, ids=None, reason=["Waiting", "for", "approval"], kind="needs_input",
+        blocker_fingerprint="approval:owner", precondition_digest="revision:7",
+    )
+    assert kanban_cli._cmd_block(args) == 0
+
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.blocker_fingerprint is not None
+        assert task.precondition_digest is not None
+        assert task.blocker_fingerprint.startswith("sha256:")
+        assert task.precondition_digest.startswith("sha256:")
 
 
 
@@ -129,7 +295,10 @@ def test_dependency_block_with_terminal_parents_parks_then_escalates(
         child = _running_task(conn, title="child-of-done", parents=(parent,))
 
         # `hermes kanban block <child> --kind dependency waiting on upstream`
-        args = argparse.Namespace(task_id=child, ids=None, reason=["waiting", "on", "upstream"], kind="dependency")
+        args = argparse.Namespace(
+            task_id=child, ids=None, reason=["waiting", "on", "upstream"], kind="dependency",
+            blocker_fingerprint="terminal-parent-wait", precondition_digest="parent-set-v1",
+        )
         assert kanban_cli._cmd_block(args) == 0
         assert "needs_input" in capsys.readouterr().out
         parked = kb.get_task(conn, child)
@@ -144,7 +313,10 @@ def test_dependency_block_with_terminal_parents_parks_then_escalates(
         # A cron/human unblocks; the worker re-declares the same impossible wait.
         assert kb.unblock_task(conn, child)
         assert kb.claim_task(conn, child, claimer="worker") is not None
-        assert kb.block_task(conn, child, reason="still waiting", kind="dependency")
+        assert kb.block_task(
+            conn, child, reason="still waiting", kind="dependency",
+            blocker_fingerprint="terminal-parent-wait", precondition_digest="parent-set-v1",
+        )
         assert kb.get_task(conn, child).status == "triage"
         loop = [e for e in kb.list_events(conn, child) if e.kind == "block_loop_detected"][-1].payload
         assert loop["recurrences"] == kb.BLOCK_RECURRENCE_LIMIT

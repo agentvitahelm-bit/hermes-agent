@@ -320,8 +320,14 @@ _SPECS = [
              help="Typed block reason. 'dependency' waits in todo (auto-promoted when "
                   "parents finish, no human); 'needs_input'/'capability' go to "
                   "blocked for a human; 'transient' marks a maybe-flaky failure. "
-                  "Repeated same-kind re-blocks after unblock route the task to "
+                  "Repeated matching blocker identities after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
+        _arg("--blocker-fingerprint",
+             help="Optional stable, non-secret blocker identity. Stored as an opaque digest; "
+                  "reuse it when display prose changes but the material blocker is the same."),
+        _arg("--precondition-digest",
+             help="Optional stable digest/identity for relevant preconditions. A changed value "
+                  "starts recurrence counting again at 1."),
     ], help="Mark one or more tasks blocked"),
     _cmd("schedule", [
         _TASK_ID,

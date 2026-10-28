@@ -634,8 +634,10 @@ class Task:
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
     session_id: Optional[str] = None         # originating HERMES_SESSION_ID; NULL from CLI/dashboard
-    # VALID_BLOCK_KINDS or None (legacy); kept across unblock so a same-kind re-block reads as a loop.
+    # VALID_BLOCK_KINDS or None (legacy); identity fields disambiguate same-kind blockers.
     block_kind: Optional[str] = None
+    blocker_fingerprint: Optional[str] = None
+    precondition_digest: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
 
@@ -655,6 +657,7 @@ class Task:
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
             skills=skills_value,
             goal_mode=bool(g("goal_mode")),
+            precondition_digest=g("block_precondition_digest") or None,
             block_recurrences=int(g("block_recurrences") or 0),
         )
 
@@ -674,6 +677,7 @@ _TASK_OPTIONAL_COLUMNS = (
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
     "model_override", "provider_override", "reasoning_effort", "goal_max_turns", "block_kind",
+    "blocker_fingerprint",
 )
 
 
@@ -866,8 +870,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- NULL for legacy/un-typed blocks). Drives routing: ``dependency`` never
     -- sits in ``blocked`` (goes to ``todo`` for parent-gating); the others go
     -- to ``blocked`` for a human. Preserved across unblock so a re-block for
-    -- the SAME kind can be recognised as a loop.
+    -- the same material blocker can be recognised as a loop.
     block_kind           TEXT,
+    -- Opaque, non-secret identity for the material blocker. Explicit caller
+    -- identities and derived kind+reason identities are stored only as hashes.
+    blocker_fingerprint  TEXT,
+    -- Optional opaque digest of the state that made the blocker relevant.
+    -- A changed digest means the same blocker is a fresh occurrence.
+    block_precondition_digest TEXT,
     -- Unblock-loop counter. Incremented each time a task is re-blocked for the
     -- same truly-blocked reason after having been unblocked. When it reaches
     -- BLOCK_RECURRENCE_LIMIT the task is routed to ``triage`` instead of
@@ -2700,6 +2710,8 @@ def complete_task(
                        claim_expires= NULL,
                        worker_pid   = NULL,
                        block_kind   = NULL,
+                       blocker_fingerprint = NULL,
+                       block_precondition_digest = NULL,
                        block_recurrences = 0
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked', 'review')
@@ -3124,7 +3136,8 @@ def edit_task(
 
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    kind: Optional[str] = None, blocker_fingerprint: Optional[str] = None,
+    precondition_digest: Optional[str] = None, expected_run_id: Optional[int] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
@@ -3144,7 +3157,8 @@ def block_task(
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
+            "SELECT status, block_kind, blocker_fingerprint, block_precondition_digest, "
+            "block_recurrences FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if cur_row is None:
             return False
@@ -3158,16 +3172,24 @@ def block_task(
         if cur_row["status"] == "blocked":
             if kind is None or expected_run_id is not None or _row_get(cur_row, "block_kind") is not None:
                 return False
+            current_fingerprint = _blocker_fingerprint(kind, reason, blocker_fingerprint)
+            current_precondition = _block_digest(precondition_digest, domain="precondition")
             classified = conn.execute(
-                "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
+                "UPDATE tasks SET block_kind = ?, blocker_fingerprint = ?, "
+                "block_precondition_digest = ?, block_recurrences = 1 "
                 "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
                 "AND current_run_id IS NULL",
-                (kind, task_id),
+                (kind, current_fingerprint, current_precondition, task_id),
             ).rowcount
             if classified != 1:
                 return False
             _append_event(conn, task_id, "blocked", {
                 "kind": kind, "reason": reason, "classified_in_place": True,
+                "previous_blocker_fingerprint": None,
+                "blocker_fingerprint": current_fingerprint,
+                "previous_precondition_digest": None,
+                "precondition_digest": current_precondition,
+                "effective_limit": BLOCK_RECURRENCE_LIMIT,
             })
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
@@ -3180,8 +3202,14 @@ def block_task(
         if kind == "dependency" and _parents_satisfied(conn, task_id):
             kind = "needs_input"
             rekind_reason = "no_open_parent"
+        current_fingerprint = _blocker_fingerprint(kind, reason, blocker_fingerprint)
+        current_precondition = _block_digest(precondition_digest, domain="precondition")
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
+            prev_fingerprint=_row_get(cur_row, "blocker_fingerprint"),
+            fingerprint=current_fingerprint,
+            prev_precondition=_row_get(cur_row, "block_precondition_digest"),
+            precondition=current_precondition,
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
         )
         if rekind_reason:
@@ -3214,35 +3242,6 @@ def block_task(
             return True
     _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
     return True
-
-
-def _route_block(
-    kind: Optional[str], reason: Optional[str], source_status: str, *,
-    prev_kind: Optional[str], prev_recurrences: int,
-) -> tuple[str, str, str, tuple, dict]:
-    """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
-
-    ``dependency`` never enters the human ``blocked`` bucket: it waits in
-    ``todo`` for ``recompute_ready``, so a cron never sees a dependency-wait
-    as something to "unblock". Callers that pass ``dependency`` with no
-    incomplete parent are re-kinded to ``needs_input`` before this runs
-    (see :func:`block_task`). Every other kind counts unblock-loop
-    recurrences: block_task only fires from running/ready (AFTER an unblock
-    returned the task to the pool), so a stored ``block_kind`` equal to the
-    incoming one means blocked -> unblocked -> re-block for the same cause
-    (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
-    """
-    payload = {"reason": reason, "kind": kind, "source_status": source_status}
-    if kind == "dependency":
-        return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
-    recurrences = prev_recurrences + 1 if prev_kind == kind else 1
-    set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
-    payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT:
-        payload["limit"] = BLOCK_RECURRENCE_LIMIT
-        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
-    return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
 def redact_review_value(value: Any) -> Any:
@@ -4199,6 +4198,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
+from hermes_cli.kanban_db_block import _block_digest, _blocker_fingerprint, _route_block
 from hermes_cli.kanban_db_boards import (
     _default_board_display_name,
     _dir_holds_board,

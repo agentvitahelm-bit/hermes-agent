@@ -195,6 +195,15 @@ KANBAN_BLOCK_SCHEMA = _schema(
                 "The others surface to a human. Omit only if none apply."
             ),
         },
+        "blocker_fingerprint": _prop("string", (
+            "Optional stable, non-secret identity for the material blocker. "
+            "It is stored only as an opaque digest. Reuse it when the display "
+            "reason changes but the blocker is still the same."
+        )),
+        "precondition_digest": _prop("string", (
+            "Optional stable digest or identity for the relevant preconditions. "
+            "Changing it resets recurrence counting for this blocker."
+        )),
     },
     ["reason"],
 )
