@@ -351,9 +351,12 @@ _SPECS = [
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),
         _bulk_ids("promote"),
+        _arg("--resolve-triage", action="store_true",
+             help="Resume one current loop-breaker Triage episode to ready. Requires a fresh "
+                  "audit reason; does not complete the task or release its children."),
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
-    ], help="Manually move one or more todo/blocked tasks to ready (recovery path)"),
+    ], help="Manually move todo/blocked tasks, or one audited loop-breaker Triage task, to ready"),
     _cmd("archive", [
         _arg("task_ids", nargs="*", help="Task ids to archive (default mode)"),
         _arg("--rm", dest="purge_ids", nargs="+",

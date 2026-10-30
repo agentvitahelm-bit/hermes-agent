@@ -112,6 +112,9 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
 BLOCK_RECURRENCE_LIMIT = 2
+# Private capability used only by the operator CLI's explicit Triage-resume
+# flag.  A public boolean alone must not grant exceptional state authority.
+_TRIAGE_PROMOTION_CAPABILITY = object()
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 
 
@@ -3480,20 +3483,64 @@ def request_changes(
 
 def promote_task(
     conn: sqlite3.Connection, task_id: str, *, actor: str, reason: Optional[str] = None,
-    dry_run: bool = False,
+    dry_run: bool = False, resolve_triage: bool = False, _triage_capability: object = None,
 ) -> tuple[bool, Optional[str]]:
-    """Operator promotion ``todo``/``blocked`` -> ``ready`` with an audit event.
-    Refused while a parent is unfinished; ``dry_run`` only validates.
-    Returns ``(ok, reason)``."""
+    """Operator promotion to ``ready`` with an audit event.
+
+    The ordinary path accepts ``todo``/``blocked``.  A loop-breaker ``triage``
+    episode can be resumed only when the explicit operator CLI supplies both
+    ``resolve_triage=True`` and the private capability, plus a fresh audit
+    reason.  Initial/specification Triage and stale historical loop evidence
+    remain ineligible.  No completion occurs and downstream children remain
+    dependency-held.  ``dry_run`` validates without mutating.
+    """
     cur_status = _task_status(conn, task_id)
     if cur_status is None:
         return False, f"task {task_id} not found"
 
-    if cur_status not in ("todo", "blocked"):
+    triage_requested = cur_status == "triage" and resolve_triage
+    if cur_status == "triage" and not resolve_triage:
+        return False, (
+            f"task {task_id} is 'triage'; use the operator CLI's explicit "
+            "--resolve-triage path with fresh audit evidence"
+        )
+    if triage_requested and _triage_capability is not _TRIAGE_PROMOTION_CAPABILITY:
+        return False, "Triage resolution is restricted to the audited operator CLI path"
+    if cur_status not in ("todo", "blocked", "triage"):
         return False, (
             f"task {task_id} is {cur_status!r}; promote only applies to "
-            f"'todo' or 'blocked'"
+            f"'todo' or 'blocked' (or an explicitly resolved loop-breaker Triage episode)"
         )
+
+    reason = str(redact_review_value(reason or "")).strip() or None
+    if triage_requested and reason is None:
+        return False, "resolving Triage requires a fresh audit reason on this invocation"
+
+    def _triage_episode_id() -> Optional[int]:
+        row = conn.execute(
+            "SELECT t.status, t.block_recurrences, t.current_run_id, "
+            "(SELECT e.id FROM task_events e WHERE e.task_id=t.id "
+            "AND e.kind IN ('block_loop_detected', 'specified', 'decomposed', 'status', 'imported') "
+            "ORDER BY e.id DESC LIMIT 1) AS triage_generation_event_id, "
+            "(SELECT e.kind FROM task_events e WHERE e.task_id=t.id "
+            "AND e.kind IN ('block_loop_detected', 'specified', 'decomposed', 'status', 'imported') "
+            "ORDER BY e.id DESC LIMIT 1) AS triage_generation_event "
+            "FROM tasks t WHERE t.id=?",
+            (task_id,),
+        ).fetchone()
+        if not (
+            row is not None
+            and row["status"] == "triage"
+            and row["current_run_id"] is None
+            and int(row["block_recurrences"] or 0) >= BLOCK_RECURRENCE_LIMIT
+            and row["triage_generation_event"] == "block_loop_detected"
+        ):
+            return None
+        return int(row["triage_generation_event_id"])
+
+    triage_episode_id = _triage_episode_id() if triage_requested else None
+    if triage_requested and triage_episode_id is None:
+        return False, f"task {task_id} is not in a current loop-breaker Triage episode"
 
     # No override: claim_task demotes ready -> todo on an undone parent whichever
     # writer set 'ready', so a forced promotion would only report a success the
@@ -3516,12 +3563,34 @@ def promote_task(
         return True, None
 
     with write_txn(conn):
+        # Re-check every exceptional precondition under the same transaction as
+        # the mutation.  This closes status and provenance TOCTOU/ABA races.
+        if triage_requested and _triage_episode_id() != triage_episode_id:
+            return False, f"task {task_id} Triage episode changed during promotion"
+        if not _parents_satisfied(conn, task_id):
+            return False, f"task {task_id} parent state changed during promotion"
+        eligible = "triage" if triage_requested else None
         upd = conn.execute(
-            "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status IN ('todo', 'blocked')", (task_id,),
+            "UPDATE tasks SET status = 'ready', "
+            "block_kind = CASE WHEN ? IS NULL THEN block_kind ELSE NULL END, "
+            "block_recurrences = CASE WHEN ? IS NULL THEN block_recurrences ELSE 0 END "
+            "WHERE id = ? AND (status IN ('todo', 'blocked') OR status = ?)",
+            (eligible, eligible, task_id, eligible),
         )
         if upd.rowcount != 1:
             return False, f"task {task_id} status changed during promotion"
+        if triage_requested:
+            _append_event(
+                conn,
+                task_id,
+                "triage_resolved",
+                {
+                    "resolution": "ready",
+                    "operator_override": True,
+                    "actor": actor,
+                    "reason": reason,
+                },
+            )
         _append_event(conn, task_id, "promoted_manual", {"actor": actor, "reason": reason})
 
     return True, None

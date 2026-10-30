@@ -1094,11 +1094,22 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     # Dedupe while preserving order; positional task_id always first.
     ids = list(dict.fromkeys(_bulk_ids(args)))
     dry_run = bool(args.dry_run)
+    resolve_triage = bool(getattr(args, "resolve_triage", False))
+    if resolve_triage and len(ids) != 1:
+        return _err("kanban promote --resolve-triage accepts one exact task at a time", 2)
 
     results: list[dict[str, object]] = []
     with kbc.connect_closing() as conn:
         for tid in ids:
-            ok, err = kb.promote_task(conn, tid, actor=author, reason=reason, dry_run=dry_run)
+            ok, err = kb.promote_task(
+                conn,
+                tid,
+                actor=author,
+                reason=reason,
+                dry_run=dry_run,
+                resolve_triage=resolve_triage,
+                _triage_capability=(kb._TRIAGE_PROMOTION_CAPABILITY if resolve_triage else None),
+            )
             results.append({"task_id": tid, "promoted": ok, "dry_run": dry_run,
                             "reason": reason, "error": err})
 
