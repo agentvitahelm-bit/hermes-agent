@@ -363,6 +363,7 @@ _SPECS = [
     _cmd("dispatch", [
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
         _arg("--task-id", help="Spawn only this exact ready/review task; skip board maintenance"),
+        _arg("--hold-token", help="Authorize exact-task dispatch of a held todo card (requires --task-id)"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
              help=f"Auto-block a task after this many consecutive non-success attempts "

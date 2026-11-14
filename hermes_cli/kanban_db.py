@@ -105,7 +105,32 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 
 # --- Constants ---
 
-VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_INITIAL_STATUSES = {"running", "todo", "blocked"}
+
+_DISPATCH_HOLD_PREFIX = "HERMES_DISPATCH_HOLD="
+_DISPATCH_HOLD_RE = re.compile(r"(?m)^HERMES_DISPATCH_HOLD=([0-9a-f]{64})$")
+
+
+def has_dispatch_hold(body: Optional[str]) -> bool:
+    """Return whether a task body declares a fail-closed dispatch hold."""
+    return any(line.startswith(_DISPATCH_HOLD_PREFIX) for line in (body or "").splitlines())
+
+
+def dispatch_hold_token(body: Optional[str]) -> Optional[str]:
+    """Return the one canonical hold token, or ``None`` for absent/malformed holds."""
+    matches = _DISPATCH_HOLD_RE.findall(body or "")
+    return matches[0] if len(matches) == 1 else None
+
+
+def dispatch_hold_authorized(body: Optional[str], candidate: Optional[str]) -> bool:
+    """Constant-time exact authorization for one canonical dispatch hold."""
+    expected = dispatch_hold_token(body)
+    return (
+        expected is not None
+        and isinstance(candidate, str)
+        and re.fullmatch(r"[0-9a-f]{64}", candidate) is not None
+        and secrets.compare_digest(expected, candidate)
+    )
 
 # Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
@@ -2050,12 +2075,16 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, body, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            if has_dispatch_hold(row["body"]):
+                # A trusted controller must claim held todo cards explicitly.
+                # Generic board sweeps must never make held todo/blocked cards runnable.
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
@@ -2203,6 +2232,38 @@ def claim_task(
     return claimed
 
 
+def claim_held_task(
+    conn: sqlite3.Connection, task_id: str, hold_token: str, *,
+    ttl_seconds: Optional[int] = None, claimer: Optional[str] = None,
+) -> Optional[Task]:
+    """Atomically claim a held ``todo`` after exact token authorization."""
+    now = int(time.time())
+    lock = claimer or _claimer_id()
+    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT body FROM tasks WHERE id = ? AND status = 'todo' AND claim_lock IS NULL",
+            (task_id,),
+        ).fetchone()
+        if not dispatch_hold_authorized(row["body"] if row is not None else None, hold_token):
+            return None
+        if not _parents_satisfied(conn, task_id):
+            _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
+            return None
+        _reclaim_dangling_run(
+            conn, task_id, statuses=("todo",), now=now, note="invariant recovery on held re-claim",
+        )
+        run_id = _claim_and_open_run(
+            conn, task_id, "todo", lock, expires, now,
+            event_extra={"source_status": "todo", "dispatch_hold_authorized": True},
+        )
+        if run_id is None:
+            return None
+        claimed = get_task(conn, task_id)
+    _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
+    return claimed
+
+
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
@@ -2245,7 +2306,8 @@ def _retry_status_for_run(
         return "ready"
     event = _latest_event(conn, task_id, "claimed", run_id)
     payload = _json_dict(_row_get(event, "payload"))
-    return "review" if payload.get("source_status") == "review" else "ready"
+    source_status = payload.get("source_status")
+    return source_status if source_status in {"review", "todo"} else "ready"
 
 
 # Run outcome -> lifecycle status a goal loop should report for a handed-off run.

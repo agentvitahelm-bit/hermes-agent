@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 # After this many consecutive non-success attempts on a task/profile the
 # dispatcher parks the task in ``blocked`` with a reason — prevents retry storms.
 DEFAULT_FAILURE_LIMIT = 2
-TARGETED_DISPATCH_CAPABILITY = "hermes.kanban.dispatch-task-once/v1"
+TARGETED_DISPATCH_CAPABILITY = "hermes.kanban.dispatch-task-once/v2"
 
 # Keep a little wall-clock budget for the worker to observe a terminal timeout
 # and make a terminal board call (kanban_block/kanban_complete/kanban_request_review)
@@ -2049,8 +2049,9 @@ def dispatch_task_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    hold_token: Optional[str] = None,
 ) -> DispatchResult:
-    """Claim and spawn one exact ready/review task without board maintenance."""
+    """Claim and spawn one exact ready/review or authorized held-todo task."""
     def _locked_tick() -> DispatchResult:
         return _dispatch_task_once_locked(
             conn,
@@ -2063,6 +2064,7 @@ def dispatch_task_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            hold_token=hold_token,
         )
 
     db_path = _kb.kanban_db_path(board=board)
@@ -2101,6 +2103,7 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    hold_token: Optional[str] = None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -2160,8 +2163,11 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
-    claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
-    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    if hold_token is not None:
+        claimed = _kb.claim_held_task(conn, task_id, hold_token, ttl_seconds=ttl_seconds)
+    else:
+        claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
+        claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
     if claimed is None:
         return False
     try:
@@ -2226,6 +2232,7 @@ def _dispatch_task_once_locked(
     board: Optional[str],
     default_assignee: Optional[str],
     max_in_progress_per_profile: Optional[int],
+    hold_token: Optional[str],
 ) -> DispatchResult:
     result = DispatchResult()
     may_spawn, _ = _tick_spawn_budget(
@@ -2234,12 +2241,19 @@ def _dispatch_task_once_locked(
     if not may_spawn:
         return result
     row = conn.execute(
-        "SELECT id, assignee, status FROM tasks WHERE id = ? AND claim_lock IS NULL",
+        "SELECT id, assignee, status, body FROM tasks WHERE id = ? AND claim_lock IS NULL",
         (task_id,),
     ).fetchone()
-    if row is None or row["status"] not in {"ready", "review"}:
+    held_todo = (
+        row is not None
+        and row["status"] == "todo"
+        and _kb.has_dispatch_hold(row["body"])
+    )
+    if row is None or (row["status"] not in {"ready", "review"} and not held_todo):
         return result
-    lane = row["status"]
+    if held_todo and not _kb.dispatch_hold_authorized(row["body"], hold_token):
+        return result
+    lane = "ready" if held_todo else row["status"]
     if lane == "review" and not review_dispatch_enabled():
         return result
     assignee = row["assignee"]
@@ -2267,6 +2281,7 @@ def _dispatch_task_once_locked(
         lane=lane, dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        hold_token=hold_token if held_todo else None,
     )
     return result
 
