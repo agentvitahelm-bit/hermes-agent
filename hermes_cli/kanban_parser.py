@@ -214,9 +214,8 @@ _SPECS = [
         _arg("--goal-max-turns", type=int, metavar="N", dest="goal_max_turns",
              help="Turn budget for --goal workers (default 20). Ignored without --goal."),
         _arg("--initial-status", choices=sorted(kb.VALID_INITIAL_STATUSES), default="running",
-             help="Initial card status. Use 'blocked' for cards "
-                  "that require immediate human ops (R3 gate) "
-                  "to skip the brief running-to-blocked transition."),
+             help="Initial card status. Use 'todo' for a queued card (dependency or "
+                  "dispatch holds make it durable), or 'blocked' for immediate human ops."),
         _json_flag(help="Emit JSON output"),
     ], help="Create a new task"),
     _cmd("swarm", [
@@ -363,6 +362,9 @@ _SPECS = [
     _cmd("dispatch", [
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
         _arg("--task-id", help="Spawn only this exact ready/review task; skip board maintenance"),
+        _arg("--hold-token", help="Exact supervision token required to release a held todo target"),
+        _arg("--exclusive-task-id", action="append", dest="exclusive_task_ids", default=[],
+             help="Refuse the exact claim atomically while this sibling task is running (repeatable)"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
              help=f"Auto-block a task after this many consecutive non-success attempts "

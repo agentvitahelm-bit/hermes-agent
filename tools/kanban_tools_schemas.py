@@ -460,12 +460,11 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "initial_status": {
             "type": "string",
-            "enum": ["running", "blocked"],
+            "enum": ["running", "blocked", "todo"],
             "description": (
-                "Initial card status. Use 'blocked' for tasks that "
-                "require immediate human ops (R3 gate) to skip the "
-                "brief running-to-blocked transition. Defaults to "
-                "'running', which preserves the usual dispatch path."
+                "Initial card status. Use 'todo' for a queued card (dependency or "
+                "dispatch holds make it durable), or 'blocked' for human ops. "
+                "Defaults to 'running', which preserves the usual dispatch path."
             ),
         },
         "skills": {

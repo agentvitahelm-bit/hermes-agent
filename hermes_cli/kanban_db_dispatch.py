@@ -35,7 +35,12 @@ if TYPE_CHECKING:
 # After this many consecutive non-success attempts on a task/profile the
 # dispatcher parks the task in ``blocked`` with a reason — prevents retry storms.
 DEFAULT_FAILURE_LIMIT = 2
-TARGETED_DISPATCH_CAPABILITY = "hermes.kanban.dispatch-task-once/v1"
+TARGETED_DISPATCH_CAPABILITY = "hermes.kanban.dispatch-task-once/v3"
+TARGETED_DISPATCH_CAPABILITIES = (
+    "hermes.kanban.dispatch-task-once/v1",
+    "hermes.kanban.dispatch-task-once/v2",
+    TARGETED_DISPATCH_CAPABILITY,
+)
 
 # Keep a little wall-clock budget for the worker to observe a terminal timeout
 # and make a terminal board call (kanban_block/kanban_complete/kanban_request_review)
@@ -2049,8 +2054,10 @@ def dispatch_task_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    hold_token: Optional[str] = None,
+    exclusive_task_ids: Optional[list[str]] = None,
 ) -> DispatchResult:
-    """Claim and spawn one exact ready/review task without board maintenance."""
+    """Claim and spawn one exact ready/review or authorized held-todo task."""
     def _locked_tick() -> DispatchResult:
         return _dispatch_task_once_locked(
             conn,
@@ -2063,6 +2070,8 @@ def dispatch_task_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            hold_token=hold_token,
+            exclusive_task_ids=exclusive_task_ids,
         )
 
     db_path = _kb.kanban_db_path(board=board)
@@ -2089,7 +2098,7 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
 
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
-    row: sqlite3.Row,
+    row: Any,
     assignee: str,
     result: DispatchResult,
     *,
@@ -2101,6 +2110,8 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    hold_token: Optional[str] = None,
+    exclusive_task_ids: Optional[list[str]] = None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -2160,8 +2171,16 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
-    claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
-    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    if lane == "review":
+        claimed = _kb.claim_review_task(
+            conn, task_id, ttl_seconds=ttl_seconds, hold_token=hold_token,
+            exclusive_task_ids=exclusive_task_ids,
+        )
+    else:
+        claimed = _kb.claim_task(
+            conn, task_id, ttl_seconds=ttl_seconds, hold_token=hold_token,
+            exclusive_task_ids=exclusive_task_ids,
+        )
     if claimed is None:
         return False
     try:
@@ -2195,7 +2214,7 @@ def _dispatch_lane_task(
         # spawn would let a task that keeps timing out loop forever. Cleared
         # only on successful completion (complete_task).
         result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
-        _count_spawn(claimed.assignee)
+        _count_spawn(claimed.assignee or "")
         return True
     except Exception as exc:
         from tools.process_registry import RestartSafeScopeUnavailable
@@ -2226,6 +2245,8 @@ def _dispatch_task_once_locked(
     board: Optional[str],
     default_assignee: Optional[str],
     max_in_progress_per_profile: Optional[int],
+    hold_token: Optional[str],
+    exclusive_task_ids: Optional[list[str]],
 ) -> DispatchResult:
     result = DispatchResult()
     may_spawn, _ = _tick_spawn_budget(
@@ -2234,10 +2255,27 @@ def _dispatch_task_once_locked(
     if not may_spawn:
         return result
     row = conn.execute(
-        "SELECT id, assignee, status FROM tasks WHERE id = ? AND claim_lock IS NULL",
+        "SELECT id, assignee, status, body FROM tasks WHERE id = ? AND claim_lock IS NULL",
         (task_id,),
     ).fetchone()
-    if row is None or row["status"] not in {"ready", "review"}:
+    if row is None:
+        return result
+    if not _kb._exclusive_tasks_idle(conn, task_id, exclusive_task_ids):
+        return result
+    required_hold = _kb.dispatch_hold_token(row["body"])
+    if required_hold == "":
+        return result
+    if hold_token is not None:
+        if required_hold != hold_token or row["status"] not in {"todo", "ready", "review"}:
+            return result
+        if row["status"] == "todo":
+            if not _kb._parents_satisfied(conn, task_id):
+                return result
+            # Keep the durable row in todo until claim_task performs the
+            # authorized todo -> running CAS in one transaction.
+            resume_status = _kb._resume_status_from_events(conn, task_id)
+            row = {**dict(row), "status": "review" if resume_status == "review" else "ready"}
+    elif required_hold is not None or row["status"] not in {"ready", "review"}:
         return result
     lane = row["status"]
     if lane == "review" and not review_dispatch_enabled():
@@ -2267,6 +2305,7 @@ def _dispatch_task_once_locked(
         lane=lane, dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        hold_token=hold_token, exclusive_task_ids=exclusive_task_ids,
     )
     return result
 
@@ -2390,11 +2429,12 @@ def _tick_spawn_budget(
 
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
-    return conn.execute(
-        "SELECT id, assignee FROM tasks "
+    rows = conn.execute(
+        "SELECT id, assignee, body FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    return [row for row in rows if _kb.dispatch_hold_token(row["body"]) is None]
 
 
 def _any_spawnable_review(

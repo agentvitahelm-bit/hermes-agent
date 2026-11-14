@@ -105,7 +105,57 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 
 # --- Constants ---
 
-VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_INITIAL_STATUSES = {"running", "blocked", "todo"}
+DISPATCH_HOLD_PREFIX = "HERMES_DISPATCH_HOLD="
+
+
+def dispatch_hold_token(body: Optional[str]) -> Optional[str]:
+    """Return an exact durable supervision token, or ``""`` for malformed holds."""
+    marker_lines = [
+        line for line in (body or "").splitlines()
+        if line.lstrip().startswith(DISPATCH_HOLD_PREFIX)
+    ]
+    matches = [
+        line[len(DISPATCH_HOLD_PREFIX):] if line.startswith(DISPATCH_HOLD_PREFIX) else ""
+        for line in marker_lines
+    ]
+    if len(matches) != 1 or not matches[0] or matches[0].strip() != matches[0]:
+        return "" if matches else None
+    return matches[0]
+
+
+def require_dispatch_hold_preserved(old_body: Optional[str], new_body: Optional[str]) -> None:
+    """Body prose may change, but an existing dispatch marker is immutable."""
+    old_lines = [line for line in (old_body or "").splitlines()
+        if line.lstrip().startswith(DISPATCH_HOLD_PREFIX)]
+    if not old_lines:
+        return
+    new_lines = [line for line in (new_body or "").splitlines()
+        if line.lstrip().startswith(DISPATCH_HOLD_PREFIX)]
+    if new_lines != old_lines:
+        raise ValueError("dispatch hold is immutable")
+
+
+def _exclusive_tasks_idle(
+    conn: sqlite3.Connection, task_id: str, exclusive_task_ids: Optional[list[str]],
+) -> bool:
+    if exclusive_task_ids is None:
+        return True
+    if not isinstance(exclusive_task_ids, list):
+        return False
+    ids = exclusive_task_ids
+    if not ids:
+        return True
+    if (any(not isinstance(value, str) or not value or value != value.strip()
+            for value in ids)
+            or task_id in ids or len(set(ids)) != len(ids)):
+        return False
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+        tuple(ids),
+    ).fetchall()
+    return len(rows) == len(ids) and all(row[1] != "running" for row in rows)
 
 # Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
@@ -1172,7 +1222,8 @@ def create_task(
     """Create a task (optionally under ``parents``); returns its id.
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
-    forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
+    forces ``triage``; an explicit initial ``todo`` queues it and ``blocked``
+    parks it for human ops.
     ``idempotency_key``: an existing non-archived task with the key is returned
     instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
     SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
@@ -2050,12 +2101,14 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, body, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            if dispatch_hold_token(row["body"]) is not None:
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
@@ -2170,9 +2223,11 @@ def _claim_and_open_run(
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, hold_token: Optional[str] = None,
+    exclusive_task_ids: Optional[list[str]] = None,
 ) -> Optional[Task]:
-    """Atomically transition ``ready -> running``.
+    """Atomically transition ``ready -> running`` or an authorized held
+    ``todo -> running``.
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
@@ -2181,6 +2236,22 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if not _exclusive_tasks_idle(conn, task_id, exclusive_task_ids):
+            return None
+        hold_row = conn.execute(
+            "SELECT body, status FROM tasks WHERE id = ? AND claim_lock IS NULL", (task_id,)
+        ).fetchone()
+        if hold_row is None:
+            return None
+        required_hold = dispatch_hold_token(hold_row["body"])
+        if required_hold == "" or (required_hold is not None and hold_token != required_hold):
+            return None
+        source_status = hold_row["status"]
+        if source_status == "todo":
+            if not required_hold or hold_token != required_hold:
+                return None
+        elif source_status != "ready":
+            return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2193,9 +2264,12 @@ def claim_task(
             return None
         # Close a leaked prior run so the CAS below doesn't strand it.
         _reclaim_dangling_run(
-            conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
+            conn, task_id, statuses=(source_status,), now=now, note="invariant recovery on re-claim",
         )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+        run_id = _claim_and_open_run(
+            conn, task_id, source_status, lock, expires, now,
+            event_extra={"source_status": source_status} if source_status == "todo" else None,
+        )
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
@@ -2205,7 +2279,8 @@ def claim_task(
 
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, hold_token: Optional[str] = None,
+    exclusive_task_ids: Optional[list[str]] = None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
@@ -2214,6 +2289,24 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if not _exclusive_tasks_idle(conn, task_id, exclusive_task_ids):
+            return None
+        hold_row = conn.execute(
+            "SELECT body, status FROM tasks WHERE id = ? AND status IN ('review', 'todo') "
+            "AND claim_lock IS NULL",
+            (task_id,),
+        ).fetchone()
+        if hold_row is None:
+            return None
+        required_hold = dispatch_hold_token(hold_row["body"])
+        if required_hold == "" or (required_hold is not None and hold_token != required_hold):
+            return None
+        source_status = hold_row["status"]
+        if source_status == "todo" and (
+            not required_hold or hold_token != required_hold
+            or _resume_status_from_events(conn, task_id) != "review"
+        ):
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2226,7 +2319,8 @@ def claim_review_task(
                 )
             return None
         run_id = _claim_and_open_run(
-            conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
+            conn, task_id, source_status, lock, expires, now,
+            event_extra={"source_status": "review"},
         )
         if run_id is None:
             return None
@@ -3060,6 +3154,13 @@ def edit_task(
         status = _task_status(conn, task_id)
         if status is None or (result is not None and status != "done"):
             return False
+        if body is not None:
+            existing_body = conn.execute(
+                "SELECT body FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            require_dispatch_hold_preserved(
+                existing_body["body"] if existing_body else None, body,
+            )
         assignments = []
         params = []
         for field, value in (("title", title), ("body", body), ("priority", priority)):
@@ -3755,6 +3856,7 @@ def specify_triage_task(
             params.append(title.strip())
             changed_fields.append("title")
         if body is not None and (body or "") != (existing["body"] or ""):
+            require_dispatch_hold_preserved(existing["body"], body)
             sets.append("body = ?")
             params.append(body)
             changed_fields.append("body")

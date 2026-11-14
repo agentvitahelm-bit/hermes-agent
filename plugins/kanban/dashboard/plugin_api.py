@@ -421,6 +421,7 @@ class CreateTaskBody(BaseModel):
     workspace_path: Optional[str] = None
     parents: list[str] = Field(default_factory=list)
     triage: bool = False
+    initial_status: str = "running"
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
@@ -678,6 +679,10 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
             sets.append("title = ?")
             vals.append(payload.title.strip())
         if payload.body is not None:
+            existing = conn.execute("SELECT body FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            kanban_db.require_dispatch_hold_preserved(
+                existing["body"] if existing else None, payload.body,
+            )
             sets.append("body = ?")
             vals.append(payload.body)
         vals.append(task_id)
@@ -709,7 +714,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.priority is not None:
             _set_priority(conn, task_id, payload.priority, board)
         if payload.title is not None or payload.body is not None:
-            _patch_title_body(conn, task_id, payload, board)
+            with _map_errors(409, ValueError):
+                _patch_title_body(conn, task_id, payload, board)
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(
             updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)

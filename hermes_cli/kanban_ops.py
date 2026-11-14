@@ -82,11 +82,23 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
     task_id = getattr(args, "task_id", None)
+    hold_token = getattr(args, "hold_token", None)
+    exclusive_task_ids = getattr(args, "exclusive_task_ids", None) or []
     targeted = task_id is not None
     if targeted and (not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip()):
         raise ValueError("kanban dispatch: --task-id must be a non-empty task ID")
     if targeted and getattr(args, "max", None) is not None:
         raise ValueError("kanban dispatch: --task-id and --max are mutually exclusive")
+    if hold_token is not None and (
+        not targeted or not isinstance(hold_token, str) or not hold_token.strip()
+        or hold_token != hold_token.strip()
+    ):
+        raise ValueError("kanban dispatch: --hold-token requires --task-id and a non-empty exact token")
+    if exclusive_task_ids and not targeted:
+        raise ValueError("kanban dispatch: --exclusive-task-id requires --task-id")
+    if any(not isinstance(value, str) or not value.strip() or value != value.strip()
+            for value in exclusive_task_ids):
+        raise ValueError("kanban dispatch: --exclusive-task-id values must be non-empty task IDs")
     with kbc.connect_closing() as conn:
         common = dict(
             dry_run=args.dry_run,
@@ -96,7 +108,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
         if targeted:
-            res = kbd.dispatch_task_once(conn, task_id, board=getattr(args, "board", None), **common)
+            res = kbd.dispatch_task_once(
+                conn, task_id, board=getattr(args, "board", None),
+                hold_token=hold_token, exclusive_task_ids=exclusive_task_ids, **common,
+            )
         else:
             res = kbd.dispatch_once(conn, max_spawn=max_spawn, **common)
     if getattr(args, "json", False):
