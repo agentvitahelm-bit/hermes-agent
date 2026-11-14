@@ -81,16 +81,24 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
+    task_id = getattr(args, "task_id", None)
+    targeted = task_id is not None
+    if targeted and (not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip()):
+        raise ValueError("kanban dispatch: --task-id must be a non-empty task ID")
+    if targeted and getattr(args, "max", None) is not None:
+        raise ValueError("kanban dispatch: --task-id and --max are mutually exclusive")
     with kbc.connect_closing() as conn:
-        res = kbd.dispatch_once(
-            conn,
+        common = dict(
             dry_run=args.dry_run,
-            max_spawn=max_spawn,
             max_in_progress=max_in_progress,
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
+        if targeted:
+            res = kbd.dispatch_task_once(conn, task_id, board=getattr(args, "board", None), **common)
+        else:
+            res = kbd.dispatch_once(conn, max_spawn=max_spawn, **common)
     if getattr(args, "json", False):
         _print_json({
             **{k: getattr(res, k)

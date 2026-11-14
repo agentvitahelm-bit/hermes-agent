@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 # After this many consecutive non-success attempts on a task/profile the
 # dispatcher parks the task in ``blocked`` with a reason — prevents retry storms.
 DEFAULT_FAILURE_LIMIT = 2
+TARGETED_DISPATCH_CAPABILITY = "hermes.kanban.dispatch-task-once/v1"
 
 # Keep a little wall-clock budget for the worker to observe a terminal timeout
 # and make a terminal board call (kanban_block/kanban_complete/kanban_request_review)
@@ -2036,6 +2037,43 @@ def dispatch_once(
     return result
 
 
+def dispatch_task_once(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    spawn_fn=None,
+    ttl_seconds: Optional[int] = None,
+    dry_run: bool = False,
+    max_in_progress: Optional[int] = None,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
+    board: Optional[str] = None,
+    default_assignee: Optional[str] = None,
+    max_in_progress_per_profile: Optional[int] = None,
+) -> DispatchResult:
+    """Claim and spawn one exact ready/review task without board maintenance."""
+    def _locked_tick() -> DispatchResult:
+        return _dispatch_task_once_locked(
+            conn,
+            task_id,
+            spawn_fn=spawn_fn,
+            ttl_seconds=ttl_seconds,
+            dry_run=dry_run,
+            max_in_progress=max_in_progress,
+            failure_limit=failure_limit,
+            board=board,
+            default_assignee=default_assignee,
+            max_in_progress_per_profile=max_in_progress_per_profile,
+        )
+
+    db_path = _kb.kanban_db_path(board=board)
+    with _kbc._dispatch_tick_lock(db_path) as held:
+        result = _locked_tick() if held else DispatchResult(skipped_locked=True)
+        if held:
+            _kbc._maybe_checkpoint_wal(conn, db_path)
+    _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+    return result
+
+
 def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:
     """Back-compat: older spawn_fn signatures (and test stubs) accept only
     ``(task, workspace)``; pass ``board`` only when the callable supports it."""
@@ -2174,6 +2212,63 @@ def _dispatch_lane_task(
         ):
             result.auto_blocked.append(claimed.id)
         return False
+
+
+def _dispatch_task_once_locked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    spawn_fn,
+    ttl_seconds: Optional[int],
+    dry_run: bool,
+    max_in_progress: Optional[int],
+    failure_limit: int,
+    board: Optional[str],
+    default_assignee: Optional[str],
+    max_in_progress_per_profile: Optional[int],
+) -> DispatchResult:
+    result = DispatchResult()
+    may_spawn, _ = _tick_spawn_budget(
+        conn, result, max_spawn=None, max_in_progress=max_in_progress, board=board,
+    )
+    if not may_spawn:
+        return result
+    row = conn.execute(
+        "SELECT id, assignee, status FROM tasks WHERE id = ? AND claim_lock IS NULL",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["status"] not in {"ready", "review"}:
+        return result
+    lane = row["status"]
+    if lane == "review" and not review_dispatch_enabled():
+        return result
+    assignee = row["assignee"]
+    default_assignee = _resolve_default_assignee(default_assignee)
+    if not assignee:
+        if lane == "review" or not default_assignee or not _apply_default_assignee(
+            conn, task_id, default_assignee, dry_run=dry_run,
+        ):
+            result.skipped_unassigned.append(task_id)
+            return result
+        assignee = default_assignee
+        result.auto_assigned_default.append(task_id)
+    per_profile_cap = max_in_progress_per_profile if (
+        isinstance(max_in_progress_per_profile, int) and max_in_progress_per_profile > 0
+    ) else None
+    per_profile_running: dict[str, int] = {}
+    if per_profile_cap is not None:
+        for profile_row in conn.execute(
+            "SELECT assignee, COUNT(*) AS n FROM tasks "
+            "WHERE status = 'running' AND assignee IS NOT NULL GROUP BY assignee"
+        ):
+            per_profile_running[profile_row["assignee"]] = int(profile_row["n"])
+    _dispatch_lane_task(
+        conn, row, assignee, result,
+        lane=lane, dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
+        failure_limit=failure_limit, spawn_fn=spawn_fn,
+        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+    )
+    return result
 
 
 def _apply_default_assignee(
