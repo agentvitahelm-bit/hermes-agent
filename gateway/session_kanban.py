@@ -11,6 +11,45 @@ import sqlite3
 from hermes_state_runtime import RuntimeStoreError
 
 
+def _validated_kanban_home(context):
+    """Validate the producer root, deriving it only for legacy canonical DB policies."""
+    from hermes_cli import kanban_db as kb
+    try:
+        board = kb._require_slug(context['board'])
+        db = Path(context['db']).resolve(strict=True)
+        raw_home = context.get('kanban_home')
+        if raw_home is None:
+            canonical_home = None
+            if board == kb.DEFAULT_BOARD and db.name == 'kanban.db':
+                canonical_home = db.parent
+            elif (db.name == 'kanban.db' and db.parent.name == board
+                  and db.parent.parent.name == 'boards' and db.parent.parent.parent.name == 'kanban'):
+                canonical_home = db.parent.parent.parent.parent
+            if canonical_home is None:
+                raise ValueError
+            return str(canonical_home)
+        if not isinstance(raw_home, str) or not raw_home.strip() or not Path(raw_home).is_absolute():
+            raise ValueError
+        home = Path(raw_home).resolve(strict=True)
+        return str(home)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ValueError('invalid_kanban_policy') from exc
+
+
+def _params_match_context(params, context):
+    for key, value in params.items():
+        if context.get(key) == value:
+            continue
+        if key == 'kanban_home' and 'kanban_home' not in context:
+            try:
+                if _validated_kanban_home(context) == value:
+                    continue
+            except ValueError:
+                pass
+        return False
+    return True
+
+
 def build_kanban_policy(connection, params, config):
     from hermes_cli import kanban_db as kb
     from hermes_cli.profiles import resolve_profile_env
@@ -20,13 +59,17 @@ def build_kanban_policy(connection, params, config):
         raise RuntimeStoreError('permission_denied')
     if actor.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
-    if (set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock'}, {'board', 'task_id', 'run_id', 'claim_lock', 'db'})
+    required = {'board', 'task_id', 'run_id', 'claim_lock'}
+    if (not required <= set(params) <= required | {'db', 'kanban_home'}
             or any(not isinstance(params[k], str) or not params[k] for k in ('board', 'task_id', 'claim_lock'))
             or type(params['run_id']) is not int):
         raise RuntimeStoreError('invalid_params')
     try:
         board = kb._require_slug(params['board'])
         path = Path(params['db']).resolve(strict=True) if 'db' in params else kb.kanban_db_path(board=board).resolve()
+        kanban_home = _validated_kanban_home({
+            'kanban_home': params.get('kanban_home'), 'board': board, 'db': str(path),
+        })
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             task = kb.get_task(conn, params['task_id'])
@@ -59,6 +102,7 @@ def build_kanban_policy(connection, params, config):
         from gateway.run import _resolve_gateway_model
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))
     context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
+        kanban_home=kanban_home,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
@@ -92,8 +136,9 @@ async def run_task(connection, params):
     if saved:
         policy = restore_policy(saved['policy'])
         context = json.loads(policy.kanban_json or '{}')
-        if (not connection.native_owner or set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock'}, {'board', 'task_id', 'run_id', 'claim_lock', 'db'})
-                or any(params[k] != context.get(k) for k in params)):
+        required = {'board', 'task_id', 'run_id', 'claim_lock'}
+        if (not connection.native_owner or not required <= set(params) <= required | {'db', 'kanban_home'}
+                or not _params_match_context(params, context)):
             raise RuntimeStoreError('permission_denied')
         from gateway.session_local_recovery import restore_local_session
         ref = restore_local_session(authority, sid)
@@ -160,7 +205,9 @@ def bind_worker_context(frame):
         return
     if frame['policy']['source'] != 'kanban':
         raise ValueError('invalid_kanban_policy')
+    kanban_home = _validated_kanban_home(context)
     env = {'HERMES_KANBAN_TASK': context['task_id'], 'HERMES_KANBAN_BOARD': context['board'],
+        'HERMES_KANBAN_HOME': kanban_home,
         'HERMES_KANBAN_DB': context['db'], 'HERMES_KANBAN_RUN_ID': str(context['run_id']),
         'HERMES_KANBAN_CLAIM_LOCK': context['claim_lock'], 'HERMES_KANBAN_WORKSPACE': context['workspace'],
         'HERMES_KANBAN_WORKSPACES_ROOT': context['workspaces_root'], 'HERMES_PROFILE': context['profile'],

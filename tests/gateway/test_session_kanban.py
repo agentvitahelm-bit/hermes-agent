@@ -41,6 +41,8 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     assert {'kanban', 'terminal', 'file'} <= set(policy.toolsets)
     assert context['task_id'] == task.id and context['run_id'] == task.current_run_id
     assert context['board'] == 'owned' and context['claim_lock'] == task.claim_lock
+    assert context['kanban_home'] == str(tmp_path.resolve())
+    assert Path(context['db']).resolve() == tmp_path / 'kanban' / 'boards' / 'owned' / 'kanban.db'
     assert context['skills'] == ['owned-skill'] and context['goal_mode'] and context['goal_max_turns'] == 3
     assert context['accept_hooks'] is True and 'Goal criteria' in context['goal_text']
     for changed in ({'run_id': task.current_run_id + 1}, {'board': 'foreign'}, {'claim_lock': 'forged'}, {'cwd': '/tmp'}):

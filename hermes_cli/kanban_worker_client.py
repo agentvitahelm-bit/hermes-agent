@@ -175,7 +175,8 @@ def main():
 def _submit():
     try:
         params = {'board': os.environ['HERMES_KANBAN_BOARD'], 'task_id': os.environ['HERMES_KANBAN_TASK'],
-            'run_id': int(os.environ['HERMES_KANBAN_RUN_ID']), 'claim_lock': os.environ['HERMES_KANBAN_CLAIM_LOCK']}
+            'run_id': int(os.environ['HERMES_KANBAN_RUN_ID']), 'claim_lock': os.environ['HERMES_KANBAN_CLAIM_LOCK'],
+            'kanban_home': os.environ['HERMES_KANBAN_HOME']}
         board_db = os.environ['HERMES_KANBAN_DB']
         # Owner startup must never inherit this worker's task/tool/goal identity.
         for key in list(os.environ):

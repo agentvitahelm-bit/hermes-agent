@@ -2954,6 +2954,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
             env[var] = override
     # Pin the board DB + workspaces root so the worker's kanban paths still
     # match after `hermes -p` rewrites HERMES_HOME (symlink / Docker layouts).
+    env["HERMES_KANBAN_HOME"] = str(_kb.kanban_home().resolve())
     env["HERMES_KANBAN_DB"] = str(_kb.kanban_db_path(board=board))
     env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(_kb.workspaces_root(board=board))
     # Board slug — defense-in-depth pin if a path is resolved without the

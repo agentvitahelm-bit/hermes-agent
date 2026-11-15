@@ -599,8 +599,9 @@ def test_worker_client_reports_the_owner_exit_and_reply(owner_worker, monkeypatc
         events: asyncio.Queue = asyncio.Queue()
 
         async def rpc(self, method, **params):
-            submitted.append(method)
+            submitted.append((method, params))
             assert method == "kanban.run" and params["task_id"] == context["task_id"]
+            assert params["kanban_home"] == context["db"].removesuffix("/kanban.db")
             return {"session_id": "s1", "receipt": {"status": "terminal", "admission_id": "a1"}}
 
     @asynccontextmanager
@@ -612,13 +613,14 @@ def test_worker_client_reports_the_owner_exit_and_reply(owner_worker, monkeypatc
     for key, value in (("HERMES_KANBAN_BOARD", "default"), ("HERMES_KANBAN_TASK", context["task_id"]),
                        ("HERMES_KANBAN_RUN_ID", str(context["run_id"])),
                        ("HERMES_KANBAN_CLAIM_LOCK", context["claim_lock"]),
-                       ("HERMES_KANBAN_DB", context["db"])):
+                       ("HERMES_KANBAN_DB", context["db"]),
+                       ("HERMES_KANBAN_HOME", context["db"].removesuffix("/kanban.db"))):
         monkeypatch.setenv(key, value)
     capsys.readouterr()
 
     assert kanban_worker_client.main() == KANBAN_RATE_LIMIT_EXIT_CODE
     out, err = capsys.readouterr()
-    assert submitted == ["kanban.run"]  # the client never re-enters the model itself
+    assert [method for method, _params in submitted] == ["kanban.run"]  # the client never re-enters the model itself
     assert "API call failed" in out
     assert f"{KANBAN_WORKER_EXIT_TRAILER}{KANBAN_RATE_LIMIT_EXIT_CODE}" in err
 

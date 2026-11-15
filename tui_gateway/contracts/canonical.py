@@ -461,6 +461,7 @@ class KanbanRunParams(Params):
     run_id: int
     claim_lock: str
     db: str | None = None
+    kanban_home: str | None = None
 
 
 class KanbanRunResult(Result):
