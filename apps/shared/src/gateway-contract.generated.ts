@@ -5013,6 +5013,7 @@ export interface KanbanRunParams {
   run_id: number
   claim_lock: string
   db?: string | null
+  kanban_home?: string | null
 }
 export interface KanbanRunResult {
   session_id: string

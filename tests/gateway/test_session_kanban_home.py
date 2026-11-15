@@ -92,6 +92,18 @@ def test_bound_worker_rejects_relative_kanban_home(tmp_path, monkeypatch):
         session_kanban.bind_worker_context(frame)
 
 
+def test_validated_kanban_home_rejects_regular_file(tmp_path):
+    home_file = tmp_path / "not-a-home"
+    home_file.touch()
+    db = tmp_path / "external.db"
+    db.touch()
+
+    with pytest.raises(ValueError, match="invalid_kanban_policy"):
+        session_kanban._validated_kanban_home({
+            "kanban_home": str(home_file), "board": "shared-board", "db": str(db),
+        })
+
+
 def test_pre_upgrade_canonical_policy_derives_shared_home_from_database(tmp_path):
     shared_home = tmp_path / "shared"
     board = "shared-board"

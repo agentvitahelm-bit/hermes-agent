@@ -22193,6 +22193,18 @@
             ],
             "default": null,
             "title": "Db"
+          },
+          "kanban_home": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Kanban Home"
           }
         },
         "required": [

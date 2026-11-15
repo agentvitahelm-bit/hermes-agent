@@ -31,6 +31,8 @@ def _validated_kanban_home(context):
         if not isinstance(raw_home, str) or not raw_home.strip() or not Path(raw_home).is_absolute():
             raise ValueError
         home = Path(raw_home).resolve(strict=True)
+        if not home.is_dir():
+            raise ValueError
         return str(home)
     except (KeyError, OSError, TypeError, ValueError) as exc:
         raise ValueError('invalid_kanban_policy') from exc
