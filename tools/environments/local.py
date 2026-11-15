@@ -792,11 +792,25 @@ def _make_run_env(env: dict) -> dict:
     client toolchain (PATH, venv, nvm/pyenv/conda: ``agent.session_client_env``) replaces the daemon's
     beneath the backend's own ``env``."""
     from agent.session_client_env import toolchain_environ
+    source_env = dict(toolchain_environ(strip_launch_profile_env(os.environ.copy())) | env)
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+    read_identity = {
+        "HERMES_KANBAN_ADMISSION_TASK": source_env["HERMES_KANBAN_TASK"],
+        "HERMES_KANBAN_ADMISSION_RUN_ID": source_env["HERMES_KANBAN_RUN_ID"],
+    } if (is_dispatcher_owned_worker_context()
+          and source_env.get("HERMES_KANBAN_TASK")
+          and source_env.get("HERMES_KANBAN_RUN_ID")) else {}
     run_env = _scrubbed_env(
-        [(dict(toolchain_environ(strip_launch_profile_env(os.environ.copy())) | env), True)],
+        [(source_env, True)],
         frozenset(),
         lambda p: _user_tools_first(_append_missing_sane_path_entries(p)),
     )
+    # A terminal subprocess is not the dispatcher-owned worker: keep the descendant
+    # write fence and strip its ambient worker identity and claim lock.  The direct
+    # worker's task/run pair is copied only to non-authoritative admission names;
+    # nested Hermes therefore cannot mistake the subprocess for the card owner.
+    # Delegate/cron contexts never receive the evidence names.
+    run_env.update(read_identity)
     # While this profile's Bot Desktop is running, its DISPLAY/XAUTHORITY/DBUS ride along so GUI
     # apps the agent launches from the terminal open on the Bot Screen the user is watching, not
     # on the user's own seat (#125830). published_env() is the pure read (no activity stamp — a
@@ -1072,9 +1086,13 @@ class LocalEnvironment(BaseEnvironment):
             if isinstance(name, str) and _matches_terminal_first_party_prefix(name)))
 
     def _snapshot_excluded_passthrough_names(self) -> tuple[str, ...]:
-        """Plus the plugins' session env names: each command gets its own session's values."""
+        """Plus command-scoped values: each command gets its own session/worker identity."""
         from hermes_cli.plugins_session_env import session_env_names
-        return tuple(sorted({*super()._snapshot_excluded_passthrough_names(), *session_env_names()}))
+        return tuple(sorted({
+            *super()._snapshot_excluded_passthrough_names(), *session_env_names(),
+            "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID",
+            "HERMES_KANBAN_ADMISSION_TASK", "HERMES_KANBAN_ADMISSION_RUN_ID",
+        }))
 
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict | None = None, persistent: bool = True):
         super().__init__(cwd=_resolve_local_initial_cwd(cwd), timeout=timeout, env=env, persist_env=persistent)

@@ -133,3 +133,119 @@ def test_snapshot_does_not_turn_later_commands_into_delegated_children(tmp_path)
         assert "[]" in parent["output"], f"parent command inherited the marker: {parent!r}"
     finally:
         env.cleanup()
+
+
+@pytest.mark.platforms("posix")
+def test_dispatcher_worker_terminal_keeps_read_identity_under_write_fence(tmp_path, monkeypatch):
+    """A direct worker command needs task/run identity for read-only admission,
+    while claim authority must remain stripped and the descendant fence retained."""
+    from tools.environments.local import LocalEnvironment
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_1234abcd")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "17")
+    monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", "private-claim")
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    env = LocalEnvironment(cwd=str(tmp_path), timeout=30)
+    try:
+        result = env.execute(
+            'printf "task=%s run=%s admission_task=%s admission_run=%s claim=%s fence=%s" '
+            '"${HERMES_KANBAN_TASK-}" "${HERMES_KANBAN_RUN_ID-}" '
+            '"${HERMES_KANBAN_ADMISSION_TASK-}" "${HERMES_KANBAN_ADMISSION_RUN_ID-}" '
+            '"${HERMES_KANBAN_CLAIM_LOCK-}" "${HERMES_DELEGATED_CHILD_CONTEXT-}"')
+        assert "task= run= admission_task=t_1234abcd admission_run=17 claim=" in result["output"]
+        assert f"fence={tmp_path}" in result["output"]
+        if os.path.exists(env._snapshot_path):
+            with open(env._snapshot_path) as snapshot:
+                saved = snapshot.read()
+            assert "HERMES_KANBAN_TASK" not in saved
+            assert "HERMES_KANBAN_RUN_ID" not in saved
+            assert "HERMES_KANBAN_ADMISSION_TASK" not in saved
+            assert "HERMES_KANBAN_ADMISSION_RUN_ID" not in saved
+    finally:
+        env.cleanup()
+
+
+@pytest.mark.platforms("posix")
+def test_delegated_child_terminal_cannot_borrow_worker_read_identity(tmp_path, monkeypatch):
+    from agent.delegation_context import delegated_child_context
+    from tools.environments.local import LocalEnvironment
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_1234abcd")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "17")
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    env = LocalEnvironment(cwd=str(tmp_path), timeout=30)
+    try:
+        with delegated_child_context():
+            result = env.execute(
+                'printf "task=%s run=%s admission_task=%s admission_run=%s fence=%s" '
+                '"${HERMES_KANBAN_TASK-}" "${HERMES_KANBAN_RUN_ID-}" '
+                '"${HERMES_KANBAN_ADMISSION_TASK-}" "${HERMES_KANBAN_ADMISSION_RUN_ID-}" '
+                '"${HERMES_DELEGATED_CHILD_CONTEXT-}"')
+        assert "task= run= admission_task= admission_run=" in result["output"]
+        assert f"fence={tmp_path}" in result["output"]
+    finally:
+        env.cleanup()
+
+
+def test_background_terminal_has_no_worker_admission_identity(monkeypatch):
+    from tools.process_registry import ProcessRegistry
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_1234abcd")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "17")
+    env = ProcessRegistry._spawn_env({})
+    assert "HERMES_KANBAN_TASK" not in env
+    assert "HERMES_KANBAN_RUN_ID" not in env
+    assert "HERMES_KANBAN_ADMISSION_TASK" not in env
+    assert "HERMES_KANBAN_ADMISSION_RUN_ID" not in env
+
+
+@pytest.mark.platforms("posix")
+def test_nested_foreground_cannot_forward_inherited_admission_identity(tmp_path, monkeypatch):
+    from tools.environments.local import LocalEnvironment
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_ADMISSION_TASK", "t_1234abcd")
+    monkeypatch.setenv("HERMES_KANBAN_ADMISSION_RUN_ID", "17")
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(tmp_path))
+    env = LocalEnvironment(cwd=str(tmp_path), timeout=30)
+    try:
+        result = env.execute(
+            'printf "admission_task=%s admission_run=%s" '
+            '"${HERMES_KANBAN_ADMISSION_TASK-}" "${HERMES_KANBAN_ADMISSION_RUN_ID-}"')
+        assert "admission_task= admission_run=" in result["output"]
+    finally:
+        env.cleanup()
+
+
+def test_nested_background_cannot_forward_inherited_admission_identity(monkeypatch, tmp_path):
+    from tools.process_registry import ProcessRegistry
+
+    monkeypatch.setenv("HERMES_KANBAN_ADMISSION_TASK", "t_1234abcd")
+    monkeypatch.setenv("HERMES_KANBAN_ADMISSION_RUN_ID", "17")
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(tmp_path))
+    env = ProcessRegistry._spawn_env({})
+    assert "HERMES_KANBAN_ADMISSION_TASK" not in env
+    assert "HERMES_KANBAN_ADMISSION_RUN_ID" not in env
+
+
+@pytest.mark.platforms("posix")
+def test_cron_context_cannot_receive_worker_admission_identity(tmp_path, monkeypatch):
+    from agent.delegation_context import non_dispatcher_owned_context
+    from tools.environments.local import LocalEnvironment
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_1234abcd")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "17")
+    monkeypatch.setenv("HERMES_KANBAN_ADMISSION_TASK", "t_inherited")
+    monkeypatch.setenv("HERMES_KANBAN_ADMISSION_RUN_ID", "99")
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    env = LocalEnvironment(cwd=str(tmp_path), timeout=30)
+    try:
+        with non_dispatcher_owned_context():
+            result = env.execute(
+                'printf "task=%s run=%s admission_task=%s admission_run=%s" '
+                '"${HERMES_KANBAN_TASK-}" "${HERMES_KANBAN_RUN_ID-}" '
+                '"${HERMES_KANBAN_ADMISSION_TASK-}" "${HERMES_KANBAN_ADMISSION_RUN_ID-}"')
+        assert "task= run= admission_task= admission_run=" in result["output"]
+    finally:
+        env.cleanup()
