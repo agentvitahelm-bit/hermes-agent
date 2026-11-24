@@ -142,14 +142,18 @@ def test_kanban_edit_updates_documented_task_fields(kanban_home):
         task_id = kb.create_task(conn, title="old title", body="old body", priority=2)
 
     kc.run_slash(
-        f"edit {task_id} --title 'new title' --body 'new body' --priority 70"
+        f"edit {task_id} --title 'new title' --body 'new body' --priority 70 --max-retries 1"
     )
 
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
         events = kb.list_events(conn, task_id)
-    assert (task.title, task.body, task.priority) == ("new title", "new body", 70)
+    assert (task.title, task.body, task.priority, task.max_retries) == ("new title", "new body", 70, 1)
     assert any(event.kind == "reprioritized" for event in events)
+    assert any(
+        event.kind == "edited" and "max_retries" in event.payload.get("fields", [])
+        for event in events
+    )
 
 
 def test_worker_link_preserves_foreign_child_rules(kanban_home, monkeypatch):

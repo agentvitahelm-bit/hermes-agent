@@ -3110,12 +3110,18 @@ def _unique_attachment_path(directory: Path, filename: str, used: set[Path]) -> 
 def edit_task(
     conn: sqlite3.Connection, task_id: str, *, title: Optional[str] = None,
     body: Optional[str] = None, priority: Optional[int] = None,
+    max_retries: Optional[int] = None,
     result: Optional[str] = None, summary: Optional[str] = None,
     metadata: Optional[dict] = None, board: Optional[str] = None,
 ) -> bool:
     """Edit task fields, optionally backfilling a completed task's result."""
+    if max_retries is not None and (isinstance(max_retries, bool) or max_retries < 1):
+        raise ValueError("max_retries must be an integer >= 1")
     changed_fields = [
-        field for field, value in (("title", title), ("body", body), ("priority", priority))
+        field for field, value in (
+            ("title", title), ("body", body), ("priority", priority),
+            ("max_retries", max_retries),
+        )
         if value is not None
     ]
     with write_txn(conn):
@@ -3124,7 +3130,10 @@ def edit_task(
             return False
         assignments = []
         params = []
-        for field, value in (("title", title), ("body", body), ("priority", priority)):
+        for field, value in (
+            ("title", title), ("body", body), ("priority", priority),
+            ("max_retries", max_retries),
+        ):
             if value is not None:
                 assignments.append(f"{field} = ?")
                 params.append(value)
